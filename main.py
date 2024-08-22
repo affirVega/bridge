@@ -1,526 +1,540 @@
-from dataclasses import dataclass, field
-from datetime import datetime
-from enum import Enum
-import os
-from typing import Optional
-from PIL import Image
-from nextcord.ext import commands
-import sqlite3
-import json
-import nextcord
-import pickle
 import asyncio
-import uuid
+from dataclasses import dataclass, field
+import enum
 import io
-import random
+import os
+import sys
+from typing import Optional
+import uuid
+from PIL import Image
 import dotenv
+import requests
+import logging
+from logging import DEBUG, INFO, WARN, ERROR, CRITICAL
+import nextcord
+from nextcord.ext import commands
+
+log = logging.getLogger('main')
+log.setLevel(DEBUG)
+stderrhandler = logging.StreamHandler(sys.stderr)
+stderrhandler.setFormatter(logging.Formatter('%(levelname)s: %(name)s at %(asctime)s on line %(lineno)d: %(message)s'))
+log.addHandler(stderrhandler)
+
+logging.getLogger('nextcord').setLevel(logging.ERROR)
+logging.getLogger('vkbottle').setLevel(logging.DEBUG)
 
 dotenv.load_dotenv()
 
-def save_img_randomname(name: str, img: Image.Image):
-    return
-    with open(f'{name} {uuid.uuid4()}.jpg', 'wb') as f:
-        img.convert("L").save(f)
+
+def tryexcept_get(function, _default=None, *args, **kwargs):
+    try:
+        return function(*args, **kwargs)
+    except Exception or RuntimeError or RuntimeWarning:
+        pass
+    return _default
 
 
-async def image_from_discord_asset(asset: nextcord.Asset | nextcord.Attachment):
-    buffer = io.BytesIO()
-    await asset.save(buffer)
-    image = Image.open(buffer)
-    return image
-
-
-def make_nextcord_file(image: Image.Image, sticker: bool = False):
-    if sticker:
-        buffer = io.BytesIO()
-        image.resize((160, 160)).convert("RGBA").save(buffer, "webp")
-        buffer.seek(0)
-        return nextcord.File(buffer, filename='sticker.webp')
-    buffer = io.BytesIO()
-    image.convert("RGB").save(buffer, 'jpeg', quality=50, optimize=True)
-    buffer.seek(0)
-    return nextcord.File(buffer, filename='image.jpeg')
-
-
-def format_message_content(message: 'MessageBarebone', reference_text=None, attachments_text=None):
-    content = f'{message.author.display_name}: {message.content or ''}'
-    if message.forwarded:
-        content = f'Переслано: {message.forwarded}\n{content}'
-    if reference_text:
-        content = f'{reference_text}\n{content}'
-    if message.reply_to:
-        pass # мяу
-    if attachments_text:
-        content = f'{content}\nФайлы: {attachments_text}'
-    return content
-    
-
-
-authors = {}
-async def author_from_discord_message(msg: nextcord.Message) -> 'Author':
-    if (Platform.Discord, msg.author.id) in authors:
-        return authors[(Platform.Discord, msg.author.id)]
-    author_pfp = await image_from_discord_asset(msg.author.display_avatar)
-    author = Author(Platform.Discord, msg.author.display_name or msg.author.global_name, msg.author.name, msg.author.id, author_pfp)
-    authors[(Platform.Discord, author.id)] = author
-    return author
-
-
-class Platform(Enum):
+class Platform(enum.Enum):
     Discord = 0
     Telegram = 1
     Vk = 2
-            
+
 
 @dataclass
 class Chat:
     platform: Platform
-    name: Optional[str]
-    server_id: Optional[int]
-    chat_id: int
+    id: int
+    server_id: Optional[int] = None
+
+    def __hash__(self):
+        return hash((self.platform, self.id, self.server_id))
+
+
+@dataclass
+class IAttachment:
+    name: Optional[str] = None
+
+    def uncache(self):
+        ...
+
+
+@dataclass
+class IPicture(IAttachment):
+    def get_image(self) -> Image.Image:
+        ...
+
+
+@dataclass
+class UrlPicture(IPicture):
+    url: str = None
+    _cached_image: Image.Image = field(default=None, init=False, repr=False)
+
+    def get_image(self) -> Optional[Image.Image]:
+        if self._cached_image:
+            return self._cached_image
+        try:
+            return self._download_image(self)
+        except Exception:
+            return None
+    
+    def _download_image(self) -> Image.Image:
+        buffer = io.BytesIO(requests.get(self.url).content)
+        self._cached_image = Image.open(buffer)
+        return self._cached_image
+    
+    def uncache(self):
+        del self._cached_image
+        self._cached_image = None
+
+
+@dataclass
+class Sticker(UrlPicture):
+    pass
+
+
+@dataclass
+class IFile(IAttachment):
+
+    def get_file(self) -> Optional[bytes]:
+        ...
+
+
+@dataclass
+class UrlFile(IFile):
+    url: str = None
+    _cached_data: bytes = field(default=None, init=False, repr=False)
+
+    def get_file(self) -> Optional[bytes]:
+        if self._cached_data:
+            return self._cached_data
+        try:
+            return self._download_file(self)
+        except Exception:
+            return None
+    
+    def _download_file(self) -> bytes:
+        self._cached_data = requests.get(self.url).content
+        return self._cached_data
+    
+    def uncache(self):
+        del self._cached_data
+        self._cached_data = None
 
 
 @dataclass
 class Author:
     platform: Platform
-    display_name: str
-    username: str
     id: int
-    profile_picture: Optional[Image.Image]
-
-
-@dataclass
-class Attachment:
-    filename: str
-    link: Optional[str]
-    data: Optional[bytes | bytearray]
-
-
-@dataclass
-class MessageBarebone:
-    uid: str
-    timestamp: datetime
-    chat: Chat
-    message_id: int
-    author: Author
-    forwarded: Optional[str]
-    content: Optional[str]
-    reply_to: Optional['MessageBarebone']
-
-    def get_key(self):
-        return (self.chat.platform, self.chat.server_id, self.chat.chat_id, self.message_id)
-
-
-@dataclass
-class Message(MessageBarebone):
-    attachments: list[Attachment] = field(default_factory=list)
-    pictures: list[Image.Image] = field(default_factory=list)
-    stickers: list[Image.Image] = field(default_factory=list)
-    # TODO voice_message: ???
-
-    def to_barebone(self):
-        return MessageBarebone(uid=self.uid, timestamp=self.timestamp, chat=self.chat, 
-                               message_id=self.message_id, author=self.author, 
-                               forwarded=self.forwarded, content=self.content, 
-                               reply_to=self.reply_to)
-
-
-class Bridger:
-    chats: dict['IBot', list[Chat]]
     name: str
-    key_to_message: dict[object, MessageBarebone]
-    uuid_to_key: dict[str, object]
+    username: str
+    pfp: IPicture
 
-    def __init__(self, name='Bridger') -> None:
-        self.name = name
-        self.chats = dict()
-        self.key_to_message = dict()
-        self.uuid_to_key = dict()
+
+@dataclass
+class MessageID:
+    chat: Chat
+    id: int
+
+    def __hash__(self):
+        return hash((self.chat, self.id))
+
+
+@dataclass
+class Message:
+    original_id: MessageID
+    author: Author
+    text: str
+    reply_to: Optional['Message'] = None
+    relay_ids: list[MessageID] = field(default_factory=list)
+    forwarded: list['Message'] = field(default_factory=list)
+    attachments: list[IAttachment] = field(default_factory=list)
+
+    def get_message_id(self, chat: Chat) -> Optional[int]:
+        if chat == self.original_id.chat:
+            return self.original_id.id
+        for relay_id in self.relay_ids:
+            if relay_id.chat == chat:
+                return relay_id.id
+        return None
+
+    def __hash__(self):
+        return hash(self.original_id)
+
+
+@dataclass
+class Coordinator:
+    bridges: list['Bridge'] = field(default_factory=list)
+    bots: list['IBot'] = field(default_factory=list)
+    chats: list['Chat'] = field(default_factory=list)
+    authors: list[Author] = field(default_factory=list)
     
-    def start(self):
-        for bot in self.chats.keys():
-            bot.start()
+    chat_to_bot: dict[Chat, 'IBot'] = field(default_factory=dict)
 
-    def add_chat(self, bot: 'IBot', chat: Chat):
-        if bot not in self.chats:
-            self.chats[bot] = list()
-        self.chats[bot].append(chat)
+    message_db: list[Message] = field(default_factory=list)
+    m_id_to_message: dict[MessageID, Message] = field(default_factory=dict)
 
-    def send_all(self, exclude_chat: Chat, message: Message):
-        self.register_message(message)
-        for bot in self.chats.keys():
-            for chat in self.chats[bot]:
-                if chat == exclude_chat: continue
-                asyncio.create_task(bot.send(chat, message))
+    def _save(self):
+        pass
 
-    def edit_all(self, exclude_chat: Chat, message: MessageBarebone):
-        self.update_message(message)
-        for bot in self.chats.keys():
-            for chat in self.chats[bot]:
-                if chat == exclude_chat: continue
-                asyncio.create_task(bot.edit(chat, message))
+    def _load(self, db):
+        pass
 
-    def delete_all(self, exclude_chat: Chat, message: MessageBarebone):
-        for bot in self.chats.keys():
-            for chat in self.chats[bot]:
-                if chat == exclude_chat: continue
-                asyncio.create_task(bot.delete(chat, message))
-        self.delete_message(message)
+    def add_author(self, author: Author):
+        if author not in self.authors:
+            self.authors.append(author)
+            log.info(f'Добавили автора {author.name}')
 
-    def find_message(self, local_chat: Chat, local_message_id: int) -> MessageBarebone | None:
-        print(f'Запрос {(local_chat.platform, local_chat.server_id, local_chat.chat_id, local_message_id)}')
-        message = self.key_to_message.get((local_chat.platform, local_chat.server_id, local_chat.chat_id, local_message_id))
-        if message:
-            print('Нашли сообщение! :)')
-        else:
-            print('Сообщение не нашли! :(')
-        return message
-    
-    def find_local_message_id(self, chat: Chat, uid: str) -> int | None:
-        keys = self.uuid_to_key.get(uid)
-        if not keys:
-            return None
-        for key in keys:
-            if key[0] == chat.platform and key[1] == chat.server_id and key[2] == chat.chat_id:
-                return key[3]
+    def get_author(self, platform: Platform, id: int) -> Optional[Author]:
+        for author in self.authors:
+            if author.id == id and author.platform == platform:
+                return author
         return None
     
-    def update_message(self, message: MessageBarebone):
-        key = message.get_key()
-        if key not in self.key_to_message:
-            self.register_message(message)
+    def start_all_bots(self):
+        log.info('Запускаем всех ботов')
+        for bot in self.bots:
+            if bot.is_running():
+                log.info(f'Бот {bot.display_name()} уже запущен')
+            else:
+                bot.start()
+
+    def db_add_message(self, message: Message):
+        if message in self.message_db:
             return
-        self.key_to_message[key].content = message.content
-    
-    def delete_message(self, message: MessageBarebone):
-        keys = self.uuid_to_key.get(message.uid, list())
-        for key in keys:
-            if key in self.key_to_message:
-                self.key_to_message.pop(key)
-
-    def register_message(self, message: MessageBarebone | Message, local_chat: Chat = None, local_message_id: int = None):
-        if isinstance(message, Message):
-            message = message.to_barebone()
-        # register original message chat
-        key = message.get_key()
-        if key not in self.key_to_message:
-            self.key_to_message[key] = message
-            if message.uid not in self.uuid_to_key:
-                self.uuid_to_key[message.uid] = list()
-            self.uuid_to_key[message.uid].append(key)
+        self.message_db.append(message)
+        for m_id in [message.original_id] + message.relay_ids:
+            if m_id not in self.m_id_to_message:
+                self.m_id_to_message[m_id] = message
+                
+        log.info(f'Добавили сообщение {message.original_id}')
+        
         if message.reply_to:
-            key = message.reply_to.get_key() 
-            if key not in self.key_to_message:
-                self.key_to_message[key] = message.reply_to
-                if message.reply_to.uid not in self.uuid_to_key:
-                    self.uuid_to_key[message.reply_to.uid] = list()
-                self.uuid_to_key[message.reply_to.uid] = key
+            self.db_add_message(message.reply_to)
         
-        # register message in local chat
-        if local_chat:
-            assert(local_chat is not None, "Надо передать local_message_id")
-            assert(local_message_id is not None, "Надо передать local_message_id")
-            key = (local_chat.platform, local_chat.server_id, local_chat.chat_id, local_message_id)
-            if key not in self.key_to_message:
-                self.key_to_message[key] = message
-                if message.uid not in self.uuid_to_key:
-                    self.uuid_to_key[message.uid] = list()
-                self.uuid_to_key[message.uid].append(key)
-        
-        print('Состояние базы')
-        print('---------------------------')
-        for key in self.key_to_message.keys():
-            msg = self.key_to_message[key]
-            print(f'{key} - {msg.author.display_name}: {msg.content}')
-
-        for uid in self.uuid_to_key.keys():
-            key = self.uuid_to_key[uid]
-            print(f'{uid} - {key}')
-        print('---------------------------')
-
-
-class IBot:
-    chats: list[Chat]
-    bridger: Bridger
+        for fwd in message.forwarded:
+            self.db_add_message(fwd)
     
+    def db_get_message(self, message_id: MessageID) -> Optional[Message]:
+        return self.m_id_to_message.get(message_id)
+
+    def db_add_message_relay_id(self, message_id: MessageID, message: Message):
+        self.m_id_to_message[message_id] = message
+        log.debug(f'Связали сообщение {message.author.name} {message.text[:20]}... с relay id {message_id}')
+
+    def add_bridge(self, bridge: 'Bridge'):
+        if bridge not in self.bridges:
+            self.bridges.append(bridge)
+            log.info(f'Добавили мост {bridge.id}')
+    
+    def add_chat_to_bridge(self, bridge: 'Bridge', chat: Chat):
+        if bridge not in self.bridges:
+            log.error('Попытались добавить чат к недобавленному мосту')
+            raise ValueError('Попытались добавить чат к недобавленному мосту', bridge, chat)
+        if chat not in self.chats:
+            self.chats.append(chat)
+        bridge.add_chat(chat)
+        log.info(f'Добавили чат {chat} в мост {bridge.id}')
+    
+    def link_bot_chat(self, bot: 'IBot', chat: Chat):
+        if chat not in self.chats:
+            log.error('Попытались слинковать бота к недобавленному чату')
+            raise ValueError('Попытались слинковать бота к недобавленному чату', bot, chat)
+        self.add_bot(bot)
+        bot.add_chat(chat)
+        if chat not in self.chat_to_bot:
+            self.chat_to_bot[chat] = bot
+        log.info(f'Связали {bot.display_name()} и чат {chat}')
+    
+    def add_bot(self, bot: 'IBot'):
+        if bot not in self.bots:
+            self.bots.append(bot)
+            log.info(f'Добавили бота {bot.display_name()}')
+
+    def get_bridges(self) -> list['Bridge']:
+        return self.bridges
+    
+    def get_bot_by_chat(self, chat: Chat) -> Optional['IBot']:
+        return self.chat_to_bot.get(chat, None)
+
+    def find_relay_bots_chats(self, chat: Chat) -> dict['IBot', list[Chat]]:
+        chat_bridges = [b for b in self.get_bridges() if chat in b.chats]
+        total_chats = list()
+        for bridge in chat_bridges:
+            total_chats += bridge.chats
+        
+        # remove chat message came from
+        total_chats.remove(chat)
+
+        relay_chat_to_bot: dict['IBot', list[Chat]] = dict()
+        for relay_chat in total_chats:
+            bot = self.get_bot_by_chat(relay_chat)
+            if not isinstance(bot, IBot):
+                log.warn(f'Не могу найти бота по чату {relay_chat}')
+                continue
+            if bot not in relay_chat_to_bot:
+                relay_chat_to_bot[bot] = list()
+            relay_chat_to_bot[bot].append(relay_chat)
+        
+        return relay_chat_to_bot
+
+    async def send_all(self, message: Message):
+        if message is None:
+            log.error('Кто-то отправил None message')
+            return
+        log.debug(f'Отправляем сообщение [{message.original_id}] {message.author.name}: {message.text[:20]}...')
+        bots_chats = self.find_relay_bots_chats(message.original_id.chat)
+        for bot in bots_chats:
+            chats = bots_chats[bot]
+            for chat in chats:
+                m_id = await bot.send_message(chat, message)
+                self.db_add_message_relay_id(m_id, message)
+                
+    
+    async def edit_all(self, new_message: Message):
+        if new_message is None:
+            log.error('Кто-то отправил None message')
+            return
+        log.debug(f'Редактируем сообщение [{new_message.original_id}] {new_message.author.name}: {new_message.text[:20]}...')
+        for relay_m_id in new_message.relay_ids:
+            bot = self.get_bot_by_chat(relay_m_id.chat)
+            if not bot:
+                log.warn(f'Не могу найти бота по чату {new_message.original_id.chat}')
+                continue
+            await bot.edit_message(relay_m_id, new_message)
+    
+    async def delete_all(self, message: Message):
+        if message is None:
+            log.error('Кто-то отправил None message')
+            return
+        log.debug(f'Удаляем сообщение [{message.original_id}] {message.author.name}: {message.text[:20]}...')
+        for relay_m_id in message.relay_ids:
+            bot = self.get_bot_by_chat(relay_m_id.chat)
+            if not bot:
+                log.warn(f'Не могу найти бота по чату {relay_m_id.chat}')
+                continue
+            await bot.delete_message(relay_m_id)
+
+
+@dataclass
+class Bridge:
+    id: int
+    chats: list[Chat] = field(default_factory=list)
+
     def add_chat(self, chat: Chat):
-        pass
+        if chat not in self.chats:
+            self.chats.append(chat)
+    
+    def remove_chat(self, chat: Chat):
+        if chat in self.chats:
+            self.chats.remove(chat)
+
+
+@dataclass
+class IBot:
+    id: int
+    name: str
+    coordinator: Coordinator
+    platform: Platform = field(default=None, init=False)
+    chats: list[Chat] = field(default_factory=list)
+
+    def log(self, level: int, message: str):
+        ...
+
+    def add_chat(self, chat: Chat):
+        if chat not in self.chats:
+            self.chats.append(chat)
+    
+    def remove_chat(self, chat: Chat):
+        if chat in self.chats:
+            self.chats.remove(chat)
+    
+    def get_current_chat(self, platform: Platform, server_id: int, chat_id: int):
+        for chat in self.chats:
+            if chat.platform == platform and chat.server_id == server_id and chat.id == chat_id:
+                return chat
+        return None
+    
+    def is_running(self) -> bool:
+        ...
     
     def start(self):
-        pass
+        ...
 
-    async def send(self, chat: Chat, message: Message):
-        pass
+    def stop(self):
+        ...
+    
+    def send_message(self, chat: Chat, message: Message) -> MessageID:
+        ...
 
-    async def edit(self, chat: Chat, message: MessageBarebone):
-        pass
+    def edit_message(self, message_id: MessageID, new_message: Message):
+        ...
 
-    async def delete(self, chat: Chat, message: MessageBarebone):
-        pass
+    def delete_message(self, message_id: MessageID):
+        ...
+    
+    def display_name(self) -> str:
+        return f'{Platform(self.platform).name} {self.id} {self.name}'
+    
+    def __hash__(self) -> int:
+        return super().__hash__()
 
 
+@dataclass
 class DiscordBot(IBot):
+    platform: Platform = field(default=Platform.Discord, init=False)
+    listtings: dict[str, object] = field(default_factory=dict)
+    bot: commands.Bot = field(default=None, init=False)
+    task: asyncio.Task = field(default=None, init=False)
 
-    def __init__(self, bridger: Bridger, settings: dict[str, object]) -> None:
-        self.bridger = bridger
-        self.settings = settings
-        self.chats = list()
-        
+    def get_current_chat_from_native_message(self, message: nextcord.Message):
+        return self.get_current_chat(Platform.Discord, message.guild.id, message.channel.id)
+
+    def log(self, level: int, message: str):
+        log.log(level, str(f'{self.id} {self.name} bot: f{message}'))
+    
+    def get_author(self, user: nextcord.User):
+        author = self.coordinator.get_author(Platform.Discord, user.id)
+        if author: 
+            return author
+        pfp = None
+        if user.avatar:
+            pfp = UrlPicture(f'pfp of {user.name}', user.avatar.url)
+        author = Author(Platform.Discord, id=user.id, 
+                        name=user.display_name or user.global_name or user.name, 
+                        username=user.name, pfp=pfp)
+        return author
+
+    def __post_init__(self):
         intents = nextcord.Intents.all()
         self.bot = commands.Bot(intents=intents)
-        self.token = settings['token']
 
         @self.bot.event
         async def on_ready():
-            print('on_ready')
+            self.log(INFO, 'on_ready')
 
         @self.bot.event
         async def on_close():
-            print('on_close')
+            self.log(INFO, 'on_clise')
 
         @self.bot.event
         async def on_message(native_message: nextcord.Message):
-            if native_message.author.id == self.bot.user.id:
+            if native_message.author == self.bot.user:
                 return
-            found_chat: Optional[Chat] = None
-            for chat in self.chats:
-                if (chat.server_id is None or chat.server_id == native_message.guild.id) and chat.chat_id == native_message.channel.id:
-                    found_chat = chat
-                    break
-            
-            if not found_chat:
-                print('Сообщение не из моего чата')
+            self.log(INFO, 'on_message')
+            chat = self.get_current_chat_from_native_message(native_message)
+            if not chat:
+                self.log(DEBUG, f'Сообщение не из моего чата: {native_message.author.name}: {native_message.content[:20]}')
                 return
-            
-            # print('Сообщение из чата', found_chat)
-            # print('message', native_message)
-            # print('attachments', native_message.attachments)
-            # print('stickers', native_message.stickers)
-            # print('reply_to', native_message.reference)
-            # print()
 
-            uid = uuid.uuid4()
-            timestamp = native_message.created_at
-            chat = found_chat
-            message_id = native_message.id
-            
-            author = await author_from_discord_message(native_message)
-            forwarded = None
-            content = native_message.content
-            reply_to = None
-            if native_message.reference is not None:
-                reference_message = native_message.reference.cached_message
-                if reference_message is None:
-                    reference_message = await native_message.channel.fetch_message(native_message.reference.message_id)
-                reply_message_id = reference_message.id
-
-                reply_to = self.bridger.find_message(chat, reply_message_id)
-                
-                if reply_to is None:
-                    print('При создании сообщения не нашли референс в базе, создаём новый...')
-                    reply_to = MessageBarebone(uuid.uuid4(), reference_message.created_at, chat, reference_message.id, 
-                                                 await author_from_discord_message(reference_message), forwarded=None, 
-                                                 content=reference_message.content, reply_to=None)
-                    # if reference_message.author.id != self.bot.user.id:
-                    #     print('Сообщение в ответ не на бота, поэтому добавляем в базу как новое локальное в этом чате')
-                    #     # если в базе не нашли сообщение и создали объект message и native_message ссылается не на сообщение бота, то создаём новое в базе
-                    #     bridger.register_message(reply_to)
-            attachments = []
-            pictures = []
-            stickers = []
-            for attachment in native_message.attachments:
-                if attachment.content_type.startswith('image'):
-                    image = await image_from_discord_asset(attachment)
-                    pictures.append(image)
-                    save_img_randomname('img', image)
-                else:
-                    # data = await attachment.read(use_cached=True)
-                    attachments.append(Attachment(attachment.filename, link=attachment.url, data=None))
-            for sticker in native_message.stickers:
-                image = await image_from_discord_asset(sticker)
-                stickers.append(image)
-                save_img_randomname('sticker', image)
-
-            message = Message(
-                uid, timestamp, chat, message_id, author, forwarded, content, reply_to, attachments, pictures, stickers
-            )
-            print('Создали нативное сообщение', message)
-            
-            self.bridger.send_all(chat, message)
+            message = await self.create_message_from_native(native_message, chat)
+            self.coordinator.db_add_message(message)
+            await self.coordinator.send_all(message)
         
         @self.bot.event
         async def on_message_edit(before: nextcord.Message, after: nextcord.Message):
-            if before.author.id == self.bot.user.id:
-                print('Изменилось сообщение меня, игнорирую')
+            if before.author == self.bot.user:
                 return
-            print(before.content, after.content)
-            if before.content == after.content:
-                print('Контень сообщения не изменился')
-                return
-            found_chat: Optional[Chat] = None
-            for chat in self.chats:
-                if (chat.server_id is None or chat.server_id == before.guild.id) and chat.chat_id == before.channel.id:
-                    found_chat = chat
-                    break
-            
-            if not found_chat:
-                print('Сообщение не из моего чата')
+            self.log(INFO, 'on_message_edit')
+            chat = self.get_current_chat_from_native_message(before)
+            if not chat:
+                self.log(DEBUG, f'Сообщение не из моего чата: {before.author.name}: {before.content[:20]}')
                 return
             
-            message = self.bridger.find_message(chat, before.id)
-            if not message:
-                message = MessageBarebone(uid=uuid.uuid4(), timestamp=before.created_at, chat=chat,
-                                          message_id=before.id, author=author_from_discord_message(before),
-                                          forwarded=None, content=None, reply_to=None)
-            message.content = after.content
-            message.content = format_message_content(message)
-            
-            self.bridger.edit_all(chat, message)
-        
+            # TODO
+
         @self.bot.event
         async def on_message_delete(native_message: nextcord.Message):
-            if native_message.author.id == self.bot.user.id:
-                print('Удалилось моё сообщение, игнорирую')
+            if native_message.author == self.bot.user:
                 return
-            found_chat: Optional[Chat] = None
-            for chat in self.chats:
-                if (chat.server_id is None or chat.server_id == native_message.guild.id) and chat.chat_id == native_message.channel.id:
-                    found_chat = chat
-                    break
-            
-            if not found_chat:
-                print('Сообщение не из моего чата')
+            self.log(INFO, 'on_message_delete')
+            chat = self.get_current_chat_from_native_message(native_message)
+            if not chat:
+                self.log(DEBUG, f'Сообщение не из моего чата: {native_message.author.name}: {native_message.content[:20]}')
                 return
             
-            message = self.bridger.find_message(chat, native_message.id)
-            if not message:
-                message = MessageBarebone(uid=uuid.uuid4(), timestamp=native_message.created_at, chat=chat,
-                                          message_id=native_message.id, author=author_from_discord_message(native_message),
-                                          forwarded=None, content=native_message.content, reply_to=None)
-            
-            self.bridger.delete_all(chat, message)
+            # TODO
 
-    def add_chat(self, chat: Chat):
-        self.chats.append(chat)
-        self.bridger.add_chat(self, chat)
+    async def create_message_from_native(self, native_message: nextcord.Message, chat: Chat) -> Message:
+        if native_message is None:
+            return None
+        message = self.coordinator.db_get_message(MessageID(chat, native_message.id))
+        if message:
+            return message
+        reply_to = None
+        if native_message.reference:
+            try:
+                reference_message = await native_message.channel.fetch_message(native_message.reference.message_id)
+                reply_to = await self.create_message_from_native(reference_message, chat)
+            except Exception:
+                pass
+        attachments = [] # TODO
+        message = Message(MessageID(chat, native_message.id),
+                            author=self.get_author(native_message.author),
+                            text=native_message.content, reply_to=reply_to,
+                            attachments=attachments)
+        return message
+    
+    def is_running(self) -> bool:
+        return self.task and self.task.done()
     
     def start(self):
-        self.task = asyncio.create_task(self.bot.start(self.token))
+        self.task = asyncio.create_task(self.bot.start(self.listtings['token']))
+        self.log(INFO, f"Бот discord {self.display_name()} запущен")
 
-    async def send(self, chat: Chat, message: MessageBarebone):
-        files = []
-        print('создаём файлы')
-        for sticker in message.stickers:
-            if len(files) >= 10: break
-            files.append(make_nextcord_file(sticker, True))
-        for picture in message.pictures:
-            if len(files) >= 10: break
-            files.append(make_nextcord_file(picture))
-        attachments_text = ''
-        for attachment in message.attachments:
-            attachments_text += f'{attachment.link}\n'
-
-        message_reference: nextcord.MessageReference = None
-        reference_text: str = None
-        if message.reply_to:
-            if message.reply_to.chat == chat:
-                print('Реплай в моём чате, отвечу на сообщение тут')
-                message_reference = nextcord.MessageReference(message_id=message.reply_to.message_id, 
-                                                              channel_id=message.reply_to.chat.chat_id, 
-                                                              guild_id=message.reply_to.chat.server_id, 
-                                                              fail_if_not_exists=True)
-            else:
-                print('Реплай в другом чате был')
-                # TODO попытаться найти это сообщение в локальном чате и на него ответить
-                message_id = self.bridger.find_local_message_id(chat, message.reply_to.uid)
-                if message_id is not None:
-                    message_reference = nextcord.MessageReference(message_id=message_id, 
-                                                              channel_id=chat.chat_id, 
-                                                              guild_id=chat.server_id, 
-                                                              fail_if_not_exists=True)
-                else:
-                    print('По uid обратно не нашли, делаем реплай в виде текста')
-                    max_length = 100
-                    reply_content = message.reply_to.content
-                    if len(reply_content) > max_length:
-                        reply_content = message.reply_to.content[:max_length] + '...'
-                    reference_text = f'В ответ на {message.reply_to.author.display_name}: {reply_content}'
-        
-        print('начинаем отправлять сообщение')
-        content = format_message_content(message, reference_text, attachments_text)
-        sent_message = await self.bot.get_channel(chat.chat_id).send(
-            content, files=files, reference=message_reference, mention_author=True, 
-        )
-        print('отправили')
-        print('регистрируем отправленное сообщение')
-        self.bridger.register_message(message, chat, sent_message.id)
-
-    async def edit(self, chat: Chat, message: MessageBarebone):
-        message_id = self.bridger.find_local_message_id(chat, message.uid)
-        if not message_id:
-            print('Не нашли message id для редактирования')
-            return
-        await self.bot.get_channel(chat.chat_id).get_partial_message(message_id).edit(content=message.content)
-        
-
-    async def delete(self, chat: Chat, message: MessageBarebone):
-        message_id = self.bridger.find_local_message_id(chat, message.uid)
-        if not message_id:
-            print('Не нашли message id для удаления')
-            return
-        await self.bot.get_channel(chat.chat_id).get_partial_message(message_id).delete()
-
-
-bridger: Bridger = None
-async def main():
-    global bridger
-    bridger = Bridger('Тесты')
-
-    if os.path.exists('messagedb.pkl'):
-        print('Читаем базу сообщений')
-        with open('messagedb.pkl', 'rb') as f:
-            bridger.key_to_message = pickle.load(f)
-            print(f'Прочитали! {len(bridger.key_to_message.keys())} сообщений в базе')
-    else:
-        print('База сообщений пуста')
+    def stop(self):
+        self.task.cancel()
     
-    if os.path.exists('uid_msgid.pkl'):
-        print('Читаем базу uid_msgid')
-        with open('uid_msgid.pkl', 'rb') as f:
-            bridger.uuid_to_key = pickle.load(f)
-            print(f'Прочитали! {len(bridger.uuid_to_key.keys())} связей в базе')
-    else:
-        print('База uid_msgid пуста')
+    async def send_message(self, chat: Chat, message: Message) -> MessageID:
+        reference = None
+        if message.reply_to:
+            if message.reply_to.original_id.chat == chat:
+                self.log(DEBUG, f"reply original id chat is current chat")
+            
+            message_id = message.reply_to.get_message_id(chat)
+            if message_id:
+                reference = nextcord.MessageReference(message_id=message_id, channel_id=chat.id, guild_id=chat.server_id, fail_if_not_exists=True)
+        sent_message = await self.bot.get_channel(chat.id).send(f'{message.author.name}: {message.text}', reference=reference)
+        return MessageID(chat, sent_message.id)
 
-    DISCORD_TOKEN=os.environ.get('DISCORD_TOKEN')
+    async def edit_message(self, message_id: MessageID, new_message: Message):
+        ...
 
-    discord = DiscordBot(bridger, {
-        'token': DISCORD_TOKEN
-    })
-    chat = Chat(Platform.Discord, 'робокоты', server_id=1254431449029935114, chat_id=1258178824726642789)
-    chat2 = Chat(Platform.Discord, 'робокоты', server_id=1254431449029935114, chat_id=1272671241056026747)
-    discord.add_chat(chat)
-    discord.add_chat(chat2)
-    bridger.start()
+    async def delete_message(self, message_id: MessageID):
+        ...
+    
+    def __hash__(self) -> int:
+        return super().__hash__()
 
+
+async def main():
+    coordinator = Coordinator()
+
+    discord_bot = DiscordBot(0, 'Чёрный кот', coordinator)
+    discord_bot.listtings = {
+        'token': os.environ.get('DISCORD_TOKEN')
+    }
+    
+    bridge = Bridge(0)
+
+    coordinator.add_bridge(bridge)
+    chat1 = Chat(Platform.Discord, id=1258178824726642789, server_id=1254431449029935114)
+    chat2 = Chat(Platform.Discord, id=1272671241056026747, server_id=1254431449029935114)
+    # chat3 = Chat()
+    coordinator.add_chat_to_bridge(bridge, chat1)
+    coordinator.add_chat_to_bridge(bridge, chat2)
+    # coordinator.add_chat_to_bridge(bridge, chat3)
+
+    coordinator.link_bot_chat(discord_bot, chat1)
+    coordinator.link_bot_chat(discord_bot, chat2)
+
+    coordinator.start_all_bots()
 
 loop = asyncio.new_event_loop()
 try:
     loop.create_task(main())
     loop.run_forever()
 except KeyboardInterrupt:
-    print('Ctrl+C pressed. Stopping...')
+    print('Ctrl+C нажата. Останавливаю...')
 finally:
-    if bridger and bridger.key_to_message:
-        print('Сохраняем базу сообщений через pickle')
-        with open('messagedb.pkl', 'wb') as f:
-            pickle.dump(bridger.key_to_message, f)
-            print('Успешно сохранили!')
-    
-    if bridger and bridger.uuid_to_key:
-        print('Сохраняем базу сообщений uid_msgid через pickle')
-        with open('uid_msgid.pkl', 'wb') as f:
-            pickle.dump(bridger.uuid_to_key, f)
-            print('Успешно сохранили!')
     loop.stop()
     loop.close()
