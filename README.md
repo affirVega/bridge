@@ -1,5 +1,23 @@
 # Bridger - мост между Discord, Telegram, VK
 
+Запуск описан ниже
+```bash
+git clone https://github.com/affirvega/bridge
+cd bridge
+
+python3 -m venv .venv
+source .venv/bin/activate
+# на windows команда для cmd и powershell:
+# .venv\Scripts\activate.bat
+# .\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+
+cp .env.example .env
+nano .env # отредактируйте .env тут
+
+python3 main.py
+```
+
 Чисто локальный проект по синхронизации чатов друг с другом.
 
 Текущий функционал проекта (после переписывания xD)
@@ -7,12 +25,12 @@
 |                      | discord | vk  | telegram |
 | -------------------- | ------- | --- | -------- |
 | Прием событий        |         |     |          |
-| - новое сообщение    | ✅       |     |          |
+| - новое сообщение    | ✅     | ✅  |          |
 | - редактирование     |         |     |          |
 | - удаление           |         |     |          |
 | Отправка в свои чаты |         |     |          |
-| - новое сообщение    | ✅       |     |          |
-| - ответ на сообщение | ✅       |     |          |
+| - новое сообщение    | ✅     | ✅  |          |
+| - ответ на сообщение | ✅     | ✅  |          |
 | - редактирование     |         |     |          |
 | - удаление           |         |     |          |
 | Отправка вложений    |         |     |          |
