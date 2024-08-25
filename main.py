@@ -2,37 +2,30 @@ import asyncio
 from dataclasses import dataclass, field
 import enum
 import io
-import json
 import os
 import random
 import sys
 from typing import Optional
-import uuid
 from PIL import Image
 import dotenv
 import requests
 import logging
-from logging import DEBUG, INFO, WARN, ERROR, CRITICAL
 
 import nextcord
+from aiogram.methods import GetUserProfilePhotos
 from nextcord.ext import commands
 
-# import vkbottle.bot
-# import vkbottle_types
-# import vkbottle_types.objects
 import vk_api
-from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType, VkBotMessageEvent, DotDict as VkDotDict, VkBotEvent
+from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType, VkBotMessageEvent, DotDict as VkDotDict
 
 
 import aiogram
 import vk_api.bot_longpoll
 
-set().symmetric_difference
-
 VK_CONVERSATION_ID = 2000000000
 
 log = logging.getLogger('main')
-log.setLevel(DEBUG)
+log.setLevel(logging.DEBUG)
 stderrhandler = logging.StreamHandler(sys.stderr)
 stderrhandler.setFormatter(logging.Formatter('%(levelname)s: %(name)s at %(asctime)s on line %(lineno)d: %(message)s'))
 log.addHandler(stderrhandler)
@@ -84,13 +77,13 @@ class IPicture(IAttachment):
 @dataclass
 class UrlPicture(IPicture):
     url: str = None
-    _cached_image: Image.Image = field(default=None, init=False, repr=False)
+    _cached_image: Optional[Image.Image] = field(default=None, init=False, repr=False)
 
     def get_image(self) -> Optional[Image.Image]:
         if self._cached_image:
             return self._cached_image
         try:
-            return self._download_image(self)
+            return self._download_image()
         except Exception:
             return None
     
@@ -119,13 +112,13 @@ class IFile(IAttachment):
 @dataclass
 class UrlFile(IFile):
     url: str = None
-    _cached_data: bytes = field(default=None, init=False, repr=False)
+    _cached_data: Optional[bytes] = field(default=None, init=False, repr=False)
 
     def get_file(self) -> Optional[bytes]:
         if self._cached_data:
             return self._cached_data
         try:
-            return self._download_file(self)
+            return self._download_file()
         except Exception:
             return None
     
@@ -144,7 +137,7 @@ class Author:
     id: int
     name: str
     username: str
-    pfp: IPicture
+    pfp: Optional[IPicture]
 
 
 @dataclass
@@ -295,7 +288,7 @@ class Coordinator:
         for relay_chat in total_chats:
             bot = self.get_bot_by_chat(relay_chat)
             if not isinstance(bot, IBot):
-                log.warn(f'Не могу найти бота по чату {relay_chat}')
+                log.warning(f'Не могу найти бота по чату {relay_chat}')
                 continue
             if bot not in relay_chat_to_bot:
                 relay_chat_to_bot[bot] = list()
@@ -323,10 +316,15 @@ class Coordinator:
             log.error('Кто-то отправил None message')
             return
         log.debug(f'Редактируем сообщение [{new_message.original_id}] {new_message.author.name}: {new_message.text[:20]}...')
-        for relay_m_id in new_message.relay_ids:
+        # relay сохранились в старом сообщении
+        old_message = self.db_get_message(new_message.original_id)
+        if old_message is None:
+            log.warning('Редактирование сообщения, которого нет в базе .-. чё делать')
+            return
+        for relay_m_id in old_message.relay_ids:
             bot = self.get_bot_by_chat(relay_m_id.chat)
             if not bot:
-                log.warn(f'Не могу найти бота по чату {new_message.original_id.chat}')
+                log.warning(f'Не могу найти бота по чату {new_message.original_id.chat}')
                 continue
             await bot.edit_message(relay_m_id, new_message)
     
@@ -338,7 +336,7 @@ class Coordinator:
         for relay_m_id in message.relay_ids:
             bot = self.get_bot_by_chat(relay_m_id.chat)
             if not bot:
-                log.warn(f'Не могу найти бота по чату {relay_m_id.chat}')
+                log.warning(f'Не могу найти бота по чату {relay_m_id.chat}')
                 continue
             await bot.delete_message(relay_m_id)
 
@@ -365,8 +363,115 @@ class IBot:
     platform: Platform = field(default=None, init=False)
     chats: list[Chat] = field(default_factory=list)
 
-    def log(self, level: int, message: str):
+    def _is_message_from_this_bot(self, native_message: ...) -> bool:
+        """
+        Возвращает True если сообщение было отправленно этим ботом для защиты от бесконечных циклов пересылок
+        """
         ...
+
+    def _message_preview_for_log(self, native_message: ...) -> str:
+        """
+        Возвращает превью нативного сообщения для логов
+        """
+        ...
+        
+    def _message_id_from_native(self, chat: Chat, native_message: ...):
+        ...
+    
+    def get_current_chat_from_native_message(self, native_message: ...) -> Optional[Chat]:
+        """
+        Возвращает чат из интересующих по нативному сообщению
+        """
+        ...
+    
+    async def create_message_from_native(self, native_message: ..., chat: Chat, retrieve_from_db: bool) -> Message:
+        """
+        Создаёт обобщённое сообщение Message для пересылки из нативного для бота сообщения
+        """
+        ...
+    
+    def is_running(self) -> bool:
+        """
+        Возвращает true если бот запущен
+        """
+        ...
+    
+    def start(self):
+        """
+        Запускает работу бота
+        """
+        ...
+
+    def stop(self):
+        """
+        Останавливает работу бота
+        """
+        ...
+    
+    async def send_message(self, chat: Chat, message: Message) -> MessageID:
+        """
+        Отправляет сообщение Message в указанный чат
+        """
+        ...
+
+    async def edit_message(self, message_id: MessageID, new_message: Message):
+        """
+        Редактирует сообщение по MessageID и новым сообщением
+        """
+        ...
+
+    async def delete_message(self, message_id: MessageID):
+        """
+        Удаляет сообщение по MessageID
+        """
+        ...
+    
+    def get_current_chat(self, platform: Platform, server_id: Optional[int], chat_id: int) -> Optional[Chat]:
+        """
+        Возвращает чат из списка своих чатов, или None если сообщение не из интересующих чатов.
+        """
+        for chat in self.chats:
+            if chat.platform == platform and chat.server_id == server_id and chat.id == chat_id:
+                return chat
+        return None
+
+    async def _handle_new_message(self, native_message: ...):
+        if self._is_message_from_this_bot(native_message):
+            return
+        log.info('_handle_new_message')
+        chat = self.get_current_chat_from_native_message(native_message)
+        if not chat:
+            log.debug(f'Сообщение не из моего чата: {self._message_preview_for_log(native_message)}')
+            return
+
+        message = await self.create_message_from_native(native_message, chat, True)
+        self.coordinator.db_add_message(message)
+        await self.coordinator.send_all(message)
+
+    async def _handle_edit_message(self, native_message: nextcord.Message):
+        if self._is_message_from_this_bot(native_message):
+            return
+        log.info('_handle_edit_message')
+        chat = self.get_current_chat_from_native_message(native_message)
+        if not chat:
+            log.debug(f'Сообщение не из моего чата: {self._message_preview_for_log(native_message)}')
+            return
+
+        message = await self.create_message_from_native(native_message, chat, False)
+        # self.coordinator.db_add_message(message)
+        await self.coordinator.edit_all(message)
+
+    async def _handle_delete_message(self, native_message: nextcord.Message):
+        if self._is_message_from_this_bot(native_message):
+            return
+        log.info('_handle_delete_message')
+        chat = self.get_current_chat_from_native_message(native_message)
+        if not chat:
+            log.debug(f'Сообщение не из моего чата: {self._message_preview_for_log(native_message)}')
+            return
+        
+        message = self.coordinator.db_get_message(self._message_id_from_native(chat, native_message))
+        await self.coordinator.delete_all(message)
 
     def add_chat(self, chat: Chat):
         if chat not in self.chats:
@@ -376,31 +481,10 @@ class IBot:
         if chat in self.chats:
             self.chats.remove(chat)
     
-    def get_current_chat(self, platform: Platform, server_id: int, chat_id: int):
-        for chat in self.chats:
-            if chat.platform == platform and chat.server_id == server_id and chat.id == chat_id:
-                return chat
-        return None
-    
-    def is_running(self) -> bool:
-        ...
-    
-    def start(self):
-        ...
-
-    def stop(self):
-        ...
-    
-    def send_message(self, chat: Chat, message: Message) -> MessageID:
-        ...
-
-    def edit_message(self, message_id: MessageID, new_message: Message):
-        ...
-
-    def delete_message(self, message_id: MessageID):
-        ...
-    
     def display_name(self) -> str:
+        """
+        Имя текущего бота для логов
+        """
         return f'{Platform(self.platform).name} {self.id} {self.name}'
     
     def __hash__(self) -> int:
@@ -414,61 +498,41 @@ class DiscordBot(IBot):
     bot: commands.Bot = field(default=None, init=False)
     task: asyncio.Task = field(default=None, init=False)
 
+    def _is_message_from_this_bot(self, native_message: nextcord.Message):
+        return native_message.author == self.bot.user
+
+    def _message_preview_for_log(self, native_message: nextcord.Message):
+        return f'{native_message.author.name}: {native_message.content[:20]}'
+
+    def _message_id_from_native(self, chat: Chat, native_message: nextcord.Message):
+        return MessageID(chat, native_message.id)
+
     def __post_init__(self):
         intents = nextcord.Intents.all()
         self.bot = commands.Bot(intents=intents)
 
         @self.bot.event
         async def on_ready():
-            self.log(INFO, 'on_ready')
+            log.info('on_ready')
 
         @self.bot.event
         async def on_close():
-            self.log(INFO, 'on_clise')
+            log.info('on_clise')
 
         @self.bot.event
         async def on_message(native_message: nextcord.Message):
-            if native_message.author == self.bot.user:
-                return
-            self.log(INFO, 'on_message')
-            chat = self.get_current_chat_from_native_message(native_message)
-            if not chat:
-                self.log(DEBUG, f'Сообщение не из моего чата: {native_message.author.name}: {native_message.content[:20]}')
-                return
-
-            message = await self.create_message_from_native(native_message, chat)
-            self.coordinator.db_add_message(message)
-            await self.coordinator.send_all(message)
+            await self._handle_new_message(native_message)
         
         @self.bot.event
-        async def on_message_edit(before: nextcord.Message, after: nextcord.Message):
-            if before.author == self.bot.user:
-                return
-            self.log(INFO, 'on_message_edit')
-            chat = self.get_current_chat_from_native_message(before)
-            if not chat:
-                self.log(DEBUG, f'Сообщение не из моего чата: {before.author.name}: {before.content[:20]}')
-                return
-            
-            # TODO
-
+        async def on_message_edit(_before: nextcord.Message, after: nextcord.Message):
+            await self._handle_edit_message(after)
+        
         @self.bot.event
         async def on_message_delete(native_message: nextcord.Message):
-            if native_message.author == self.bot.user:
-                return
-            self.log(INFO, 'on_message_delete')
-            chat = self.get_current_chat_from_native_message(native_message)
-            if not chat:
-                self.log(DEBUG, f'Сообщение не из моего чата: {native_message.author.name}: {native_message.content[:20]}')
-                return
-            
-            # TODO
+            await self._handle_delete_message(native_message)
 
     def get_current_chat_from_native_message(self, message: nextcord.Message):
         return self.get_current_chat(Platform.Discord, message.guild.id, message.channel.id)
-
-    def log(self, level: int, message: str):
-        log.log(level, str(f'{self.id} {self.name} bot: f{message}'))
     
     def get_author(self, user: nextcord.User):
         author = self.coordinator.get_author(Platform.Discord, user.id)
@@ -482,19 +546,20 @@ class DiscordBot(IBot):
                         username=user.name, pfp=pfp)
         return author
 
-    async def create_message_from_native(self, native_message: nextcord.Message, chat: Chat) -> Message:
+    async def create_message_from_native(self, native_message: nextcord.Message, chat: Chat, retrieve_from_db=True) -> Optional[Message]:
         if native_message is None:
             return None
-        message = self.coordinator.db_get_message(MessageID(chat, native_message.id))
-        if message:
-            return message
+        if retrieve_from_db:
+            message = self.coordinator.db_get_message(MessageID(chat, native_message.id))
+            if message:
+                return message
         reply_to = None
         if native_message.reference:
             try:
                 reference_message = await native_message.channel.fetch_message(native_message.reference.message_id)
                 reply_to = await self.create_message_from_native(reference_message, chat)
             except Exception:
-                log.warn('Не получилось получить reference сообщение')
+                log.warning('Не получилось получить reference сообщение')
         attachments = [] # TODO
         message = Message(MessageID(chat, native_message.id),
                             author=self.get_author(native_message.author),
@@ -507,29 +572,38 @@ class DiscordBot(IBot):
     
     def start(self):
         self.task = asyncio.create_task(self.bot.start(self.settings['token']))
-        self.log(INFO, f"Бот discord {self.display_name()} запущен")
+        log.info(f"Бот discord {self.display_name()} запущен")
 
     def stop(self):
         self.task.cancel()
     
+    def format_message(self, chat: Chat, message: Message) -> str:
+        return f'{message.author.name}: {message.text}'
+
     async def send_message(self, chat: Chat, message: Message) -> MessageID:
         reference = None
         if message.reply_to:
             if message.reply_to.original_id.chat == chat:
-                self.log(DEBUG, f"reply original id chat is current chat")
+                log.debug(f"reply original id chat is current chat")
             
             message_id = message.reply_to.get_message_id(chat)
             if message_id:
                 reference = nextcord.MessageReference(message_id=message_id, channel_id=chat.id, guild_id=chat.server_id, fail_if_not_exists=True)
         channel = self.bot.get_channel(chat.id)
-        sent_message = await self.bot.get_channel(chat.id).send(f'{message.author.name}: {message.text}', reference=reference)
+        content = self.format_message(chat, message)
+        sent_message = await channel.send(content, reference=reference)
         return MessageID(chat, sent_message.id)
 
     async def edit_message(self, message_id: MessageID, new_message: Message):
-        ...
+        channel = self.bot.get_channel(message_id.chat.id)
+        content = self.format_message(message_id.chat, new_message)
+        await channel.get_partial_message(message_id.id).edit(
+            content=content
+        )
 
     async def delete_message(self, message_id: MessageID):
-        ...
+        channel = self.bot.get_channel(message_id.chat.id)
+        await channel.get_partial_message(message_id.id).delete()
     
     def __hash__(self) -> int:
         return super().__hash__()
@@ -551,28 +625,27 @@ class VkBot(IBot):
         group_id = data[0]['id']
         self.longpoll = VkBotLongPoll(self.vk_api, group_id=group_id, wait=-5) # -5 потому что longpoll.check добавляет 10 к запросу
 
-        # async def on_message(native_message):
-        #     if self.bot_data.id == native_message.from_id:
-        #         return
-        #     self.log(INFO, 'on_message')
-        #     chat = self.get_current_chat_from_native_message(native_message)
-        #     if not chat:
-        #         self.log(DEBUG, f'Сообщение не из моего чата: {native_message.text[:20]}')
-        #         return
+    def _is_message_from_this_bot(self, native_message: dict) -> bool:
+        return False
 
-        #     message = await self.create_message_from_native(native_message, chat)
-        #     self.coordinator.db_add_message(message)
-        #     await self.coordinator.send_all(message)
+    def _message_preview_for_log(self, native_message: dict) -> str:
+        return native_message['text'][:20]
+
+    def _message_id_from_native(self, chat: Chat, native_message: dict):
+        conversation_message_id = native_message['conversation_message_id']
+        get_by_id_response = self.api.messages.get_by_conversation_message_id(peer_id=VK_CONVERSATION_ID+chat.id, 
+            conversation_message_ids=str(conversation_message_id), 
+            extended=False)
+        message_data = get_by_id_response['items'][0]
+        message_id = message_data['id']
+        return MessageID(chat, message_id)
 
     def get_current_chat_from_native_message(self, message: VkDotDict):
         return Chat(Platform.Vk, message.peer_id - VK_CONVERSATION_ID, None)
-
-    def log(self, level: int, message: str):
-        log.log(level, str(f'{self.id} {self.name} bot: f{message}'))
     
     async def get_author(self, user_id: int):
         author = self.coordinator.get_author(Platform.Vk, user_id)
-        if author: 
+        if author:
             return author
         pfp = None
         response_data = self.api.users.get(user_ids=[user_id], fields=['photo_max_orig', 'screen_name'])
@@ -584,27 +657,23 @@ class VkBot(IBot):
                         name=name, username=user_data['screen_name'], pfp=pfp)
         return author
 
-    async def create_message_from_native(self, native_message: VkDotDict, chat: Chat) -> Message:
+    async def create_message_from_native(self, native_message: VkDotDict, chat: Chat, retrieve_from_db=True) -> Optional[Message]:
         if native_message is None:
             return None
         
-        conversation_message_id = native_message['conversation_message_id']
-        hui = self.api.messages.get_by_conversation_message_id(peer_id=VK_CONVERSATION_ID+chat.id, 
-            conversation_message_ids=str(conversation_message_id), 
-            extended=False)
-        message_data = hui['items'][0]
-        message_id = message_data['id']
-        message = self.coordinator.db_get_message(MessageID(chat, message_id))
-        if message:
-            return message
+        message_id = self._message_id_from_native(chat, native_message)
+        if retrieve_from_db:
+            message = self.coordinator.db_get_message(message_id)
+            if message:
+                return message
         reply_to = None
         if 'reply_message' in native_message:
             try:
                 reply_to = await self.create_message_from_native(native_message.get('reply_message'), chat)
             except Exception:
-                log.warn('Не получилось получить reference сообщение')
+                log.warning('Не получилось получить reference сообщение')
         attachments = [] # TODO
-        message = Message(MessageID(chat, message_id),
+        message = Message(message_id,
                             author=await self.get_author(native_message['from_id']),
                             text=native_message['text'], reply_to=reply_to,
                             attachments=attachments)
@@ -613,93 +682,42 @@ class VkBot(IBot):
     def is_running(self) -> bool:
         return self.task and self.task.done()
     
-    async def process_event(self, event: VkBotEvent):
-        self.log(INFO, 'on_message')
-        chat = self.get_current_chat_from_native_message(event.message)
-        if not chat:
-            self.log(DEBUG, f'Сообщение не из моего чата: {event.message.text[:20]}')
-            return
-
-        message = await self.create_message_from_native(event.message, chat)
-        self.coordinator.db_add_message(message)
-        await self.coordinator.send_all(message)
-    
     async def _run_polling(self):
         while not asyncio.current_task().cancelled():
             await asyncio.sleep(0)
             try:
                 for event in self.longpoll.check():
                     await asyncio.sleep(0)
-                    self.log(DEBUG, event)
+                    log.debug(event)
                     if isinstance(event, VkBotMessageEvent):
-
                         if event.type == VkBotEventType.MESSAGE_NEW:
-                            print('Новое сообщение: cmsgid', event.message.conversation_message_id)
-
-                            print('Для меня от: ', end='')
-
-                            print(event.message.from_id)
-
-                            print('Текст:', event.message.text)
-                            #     if self.bot_data.id == native_message.from_id:
-                            #         return
-                            await self.process_event(event)
+                            await self._handle_new_message(event.message)
                         elif event.type == VkBotEventType.MESSAGE_REPLY:
-                            print('Новое сообщение реплай:')
-
-                            print('От меня для: ', end='')
-
-                            print(event.obj.peer_id)
-
-                            print('Текст:', event.obj.text)
-                            await self.process_event(event)
-                        elif event.type == VkBotEventType.MESSAGE_TYPING_STATE:
-                            print('Печатает ', end='')
-
-                            print(event.obj.from_id, end=' ')
-
-                            print('для ', end='')
-
-                            print(event.obj.to_id)
-                    elif event.type == VkBotEventType.GROUP_JOIN:
-                        print(event.obj.user_id, end=' ')
-
-                        print('Вступил в группу!')
-                    elif event.type == VkBotEventType.GROUP_LEAVE:
-                        print(event.obj.user_id, end=' ')
-
-                        print('Покинул группу!')
-                    else:
-                        print(event.type)
-
-                    print()
+                            await self._handle_new_message(event.message)
                     if asyncio.current_task().cancelled():
                         return
             except Exception as e:
-                self.log(ERROR, e)
+                log.error(e)
     
     def start(self):
         self.task = asyncio.create_task(self._run_polling())
-        self.log(INFO, f"Бот vk {self.display_name()} запущен")
+        log.info(f"Бот vk {self.display_name()} запущен")
 
     def stop(self):
         self.task.cancel()
     
+    def format_message(self, chat: Chat, message: Message) -> str:
+        return f'{message.author.name}: {message.text}'
+
     async def send_message(self, chat: Chat, message: Message) -> MessageID:
         reply_to = None
         if message.reply_to:
             if message.reply_to.original_id.chat == chat:
-                self.log(DEBUG, f"reply original id chat is current chat")
+                log.debug(f"reply original id chat is current chat")
             reply_to = message.reply_to.get_message_id(chat)
-
-            # forward = json.dumps({
-            #     'conversation_message_ids': [conv_message_id], 
-            #     'peer_id': VK_CONVERSATION_ID+chat.id,
-            #     'reply': True
-            # })
             
         attachment_str = '' # TODO
-        text = f'{message.author.name}: {message.text}'
+        text = self.format_message(chat, message)
 
         conversation_message_id = self.api.messages.send(
             chat_id=chat.id,
@@ -707,16 +725,26 @@ class VkBot(IBot):
             attachment=attachment_str,
             reply_to=reply_to,
             random_id=random.randint(0, 1<<31)) 
-        # hui = await self.bot.api.messages.get_by_conversation_message_id(VK_CONVERSATION_ID+chat.id, [conversation_message_id], False)
-        # message_data = hui.items[0]
 
         return MessageID(chat, conversation_message_id)
 
     async def edit_message(self, message_id: MessageID, new_message: Message):
-        ...
+        attachment_str = '' # TODO
+        text = self.format_message(message_id.chat, new_message)
+        self.api.messages.edit(
+            peer_id=message_id.chat.id + VK_CONVERSATION_ID,
+            message=text,
+            attachment=attachment_str,
+            keep_forward_messages=1,
+            message_id=message_id.id
+        )
 
     async def delete_message(self, message_id: MessageID):
-        ...
+        self.api.messages.delete(
+            peer_id=message_id.chat.id + VK_CONVERSATION_ID,
+            message_ids=str(message_id.id),
+            delete_for_all=1
+        )
     
     def __hash__(self) -> int:
         return super().__hash__()
@@ -729,6 +757,15 @@ class TelegramBot(IBot):
     bot: aiogram.Bot = field(default=None, init=False)
     task: asyncio.Task = field(default=None, init=False)
 
+    def _is_message_from_this_bot(self, native_message: aiogram.types.Message) -> bool:
+        return native_message.from_user.id == self.bot.id
+
+    def _message_preview_for_log(self, native_message: aiogram.types.Message) -> str:
+        return f'{native_message.from_user.full_name}: {native_message.text[:20]}'
+
+    def _message_id_from_native(self, chat: Chat, native_message: aiogram.types.Message):
+        return MessageID(chat, native_message.message_id)
+
     def __post_init__(self):
         self.bot = aiogram.Bot(token=self.settings['token'])
 
@@ -736,42 +773,21 @@ class TelegramBot(IBot):
 
         @self.dp.message()
         async def on_message(native_message: aiogram.types.Message):
-            if native_message.from_user.id == self.bot.id:
-                return
-            self.log(INFO, 'on_message')
-            chat = self.get_current_chat_from_native_message(native_message)
-            if not chat:
-                self.log(DEBUG, f'Сообщение не из моего чата: {native_message.from_user.full_name}: {native_message.text[:20]}')
-                return
-
-            message = await self.create_message_from_native(native_message, chat)
-            self.coordinator.db_add_message(message)
-            await self.coordinator.send_all(message)
+            await self._handle_new_message(native_message)
         
         @self.dp.edited_message()
         async def on_message_edit(edited_message: aiogram.types.Message):
-            if edited_message.author == self.bot.user:
-                return
-            self.log(INFO, 'on_message_edit')
-            chat = self.get_current_chat_from_native_message(edited_message)
-            if not chat:
-                self.log(DEBUG, f'Сообщение не из моего чата: {edited_message.author.name}: {edited_message.content[:20]}')
-                return
-            
-            # TODO
+            await self._handle_edit_message(edited_message)
 
     def get_current_chat_from_native_message(self, message: aiogram.types.Message):
         return self.get_current_chat(Platform.Telegram, None, message.chat.id)
-
-    def log(self, level: int, message: str):
-        log.log(level, str(f'{self.id} {self.name} bot: f{message}'))
     
     def get_author(self, user: aiogram.types.User):
         author = self.coordinator.get_author(Platform.Telegram, user.id)
         if author: 
             return author
         pfp = None
-        profile_photos: aiogram.types.user_profile_photos.UserProfilePhotos = user.get_profile_photos(limit=1)
+        profile_photos: GetUserProfilePhotos = user.get_profile_photos(limit=1)
         print(profile_photos)
         # if len(profile_photos.photos) >= 1:
         #     pfp = UrlPicture(f'pfp of {user.full_name}', profile_photos.photos[0])
@@ -780,20 +796,22 @@ class TelegramBot(IBot):
                         username=user.username, pfp=pfp)
         return author
 
-    async def create_message_from_native(self, native_message: aiogram.types.Message, chat: Chat) -> Message:
+    async def create_message_from_native(self, native_message: aiogram.types.Message, chat: Chat, retrieve_from_db=True) -> Optional[Message]:
         if native_message is None:
             return None
-        message = self.coordinator.db_get_message(MessageID(chat, native_message.message_id))
-        if message:
-            return message
+        message_id = self._message_id_from_native(chat, native_message)
+        if retrieve_from_db:
+            message = self.coordinator.db_get_message(message_id)
+            if message:
+                return message
         reply_to = None
         if native_message.reply_to_message:
             try:
                 reply_to = await self.create_message_from_native(native_message.reply_to_message, chat)
             except Exception:
-                log.warn('Не получилось получить reference сообщение')
+                log.warning('Не получилось получить reference сообщение')
         attachments = [] # TODO
-        message = Message(MessageID(chat, native_message.message_id),
+        message = Message(message_id,
                             author=self.get_author(native_message.from_user),
                             text=native_message.text, reply_to=reply_to,
                             attachments=attachments)
@@ -804,33 +822,38 @@ class TelegramBot(IBot):
     
     def start(self):
         self.task = asyncio.create_task(self.dp.start_polling(self.bot))
-        self.log(INFO, f"Бот telegram {self.display_name()} запущен")
+        log.info(f"Бот telegram {self.display_name()} запущен")
 
     def stop(self):
         asyncio.create_task(self.dp.stop_polling())
         # self.task.cancel()
+
+    def format_message(self, chat: Chat, message: Message) -> str:
+        return f'{message.author.name}: {message.text}'
     
     async def send_message(self, chat: Chat, message: Message) -> MessageID:
         message_id = None
         if message.reply_to:
             if message.reply_to.original_id.chat == chat:
-                self.log(DEBUG, f"reply original id chat is current chat")
+                log.debug(f"reply original id chat is current chat")
             
             message_id = message.reply_to.get_message_id(chat)
-        sent_message = await self.bot.send_message(chat_id=chat.id, text=f'{message.author.name}: {message.text}', reply_to_message_id=message_id)
+        content=self.format_message(chat, message)
+        sent_message = await self.bot.send_message(chat_id=chat.id, text=content, reply_to_message_id=message_id)
         return MessageID(chat, sent_message.message_id)
 
     async def edit_message(self, message_id: MessageID, new_message: Message):
-        ...
+        content = self.format_message(message_id.chat, new_message)
+        await self.bot.edit_message_text(text=content, chat_id=message_id.chat.id, message_id=message_id.id)
 
     async def delete_message(self, message_id: MessageID):
-        ...
+        await self.bot.delete_message(message_id.chat.id, message_id.id)
     
     def __hash__(self) -> int:
         return super().__hash__()
 
 
-coordinator: Coordinator = None
+coordinator: Optional[Coordinator] = None
 async def main():
     global coordinator
     coordinator = Coordinator()
@@ -855,9 +878,9 @@ async def main():
     coordinator.add_chat_to_bridge(bridge, chat1)
     coordinator.link_bot_chat(discord_bot, chat1)
     
-    # chat2 = Chat(Platform.Discord, id=1272671241056026747, server_id=1254431449029935114)
-    # coordinator.add_chat_to_bridge(bridge, chat2)
-    # coordinator.link_bot_chat(discord_bot, chat2)
+    chat2 = Chat(Platform.Discord, id=1272671241056026747, server_id=1254431449029935114)
+    coordinator.add_chat_to_bridge(bridge, chat2)
+    coordinator.link_bot_chat(discord_bot, chat2)
     
     chat3 = Chat(Platform.Vk, id=4)
     coordinator.add_chat_to_bridge(bridge, chat3)
@@ -879,6 +902,7 @@ if __name__ == '__main__':
         print('Ctrl+C нажата. Останавливаю...')
     finally:
         print('finally начало...')
-        coordinator.stop_all_bots()
+        if coordinator is not None:
+            coordinator.stop_all_bots()
         loop.stop()
         loop.close()
