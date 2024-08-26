@@ -60,8 +60,53 @@ class UrlPicture(IPicture):
 
 
 @dataclass
-class Sticker:
-    picture: IPicture
+class LocalImage(IPicture):
+    file_path: str = None
+    _cached_data: Optional[Image.Image] = field(default=None, init=False, repr=False)
+
+    def get_file(self) -> Optional[Image.Image]:
+        if self._cached_data:
+            return self._cached_data
+        try:
+            return self._open_file()
+        except Exception:
+            return None
+    
+    def _open_file(self) -> Image.Image:
+        with open(self.file_path, 'rb') as f:
+            self._cached_data = Image.open(f)
+        return self._cached_data
+    
+    def uncache(self):
+        del self._cached_data
+        self._cached_data = None
+
+
+@dataclass
+class TempImage(IPicture):
+    cached_image: Optional[Image.Image] = field(default=None, repr=False)
+
+    def set_image(self, image: Image.Image):
+        self.cached_image = image
+
+    def get_image(self) -> Optional[Image.Image]:
+        if self.cached_image:
+            return self.cached_image
+        return None
+    
+    def uncache(self):
+        del self.cached_image
+        self.cached_image = None
+
+
+@dataclass
+class Sticker(IAttachment):
+    picture: IPicture = None
+
+
+@dataclass
+class UrlLink(IAttachment):
+    url: str = None
 
 
 @dataclass
@@ -92,6 +137,45 @@ class UrlFile(IFile):
         del self._cached_data
         self._cached_data = None
 
+
+@dataclass
+class LocalFile(IFile):
+    file_path: str = None
+    _cached_data: Optional[bytes] = field(default=None, init=False, repr=False)
+
+    def get_file(self) -> Optional[bytes]:
+        if self._cached_data:
+            return self._cached_data
+        try:
+            return self._open_file()
+        except Exception:
+            return None
+    
+    def _open_file(self) -> bytes:
+        with open(self.file_path, 'rb') as f:
+            self._cached_data = f.read()
+        return self._cached_data
+    
+    def uncache(self):
+        del self._cached_data
+        self._cached_data = None
+
+
+@dataclass
+class TempFile(IFile):
+    cached_data: Optional[bytes] = field(default=None, repr=False)
+
+    def set_data(self, data: bytes):
+        self.cached_data = data
+
+    def get_file(self) -> Optional[bytes]:
+        if self.cached_data:
+            return self.cached_data
+        return None
+    
+    def uncache(self):
+        del self.cached_data
+        self.cached_data = None
 
 @dataclass
 class Author:

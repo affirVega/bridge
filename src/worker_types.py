@@ -6,6 +6,8 @@ from message_types import *
 
 log = logging.getLogger('main')
 
+MAX_FILE_SIZE=1024*1024*5
+
 @dataclass
 class Coordinator:
     bridges: list['Bridge'] = field(default_factory=list)

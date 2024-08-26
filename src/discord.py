@@ -73,7 +73,30 @@ class DiscordBot(IBot):
                 reply_to = await self.create_message_from_native(reference_message, chat)
             except Exception:
                 log.warning('Не получилось получить reference сообщение')
+        
         attachments = [] # TODO
+        for att in native_message.attachments:
+            log.info(att.content_type)
+            log.info(f'{att.filename} - {att.description}. {att.height}:{att.width}')
+            if att.content_type is None:
+                att.content_type = ''
+            if att.content_type.startswith('image'):
+                image = UrlPicture(att.filename, att.url)
+                attachments.append(image)
+            elif att.content_type.startswith('video'):
+                link = UrlLink(att.filename, att.url)
+                attachments.append(link)
+            elif att.size <= MAX_FILE_SIZE:
+                file = UrlFile(att.filename, att.url)
+                attachments.append(file)
+            else:
+                file = UrlLink(att.filename, att.url)
+                attachments.append(file)
+        for native_sticker in native_message.stickers:
+            picture = UrlPicture(None, native_sticker.url)
+            sticker = Sticker(native_sticker.name, picture)
+            attachments.append(sticker)
+        
         message = Message(MessageID(chat, native_message.id),
                             author=self.get_author(native_message.author),
                             text=native_message.content, reply_to=reply_to,
@@ -102,14 +125,52 @@ class DiscordBot(IBot):
             message_id = message.reply_to.get_message_id(chat)
             if message_id:
                 reference = nextcord.MessageReference(message_id=message_id, channel_id=chat.id, guild_id=chat.server_id, fail_if_not_exists=True)
-        channel = self.bot.get_channel(chat.id)
+        
+        links = ''
+        files = []
+        for attachment in message.attachments:
+            if isinstance(attachment, IPicture):
+                image = attachment.get_image()
+                buffer = io.BytesIO()
+                image.save(buffer, format='webp')
+                buffer.seek(0)
+                file = nextcord.File(fp=buffer, filename=(attachment.name or 'image') + '.webp')
+                files.append(file)
+            elif isinstance(attachment, Sticker):
+                image = attachment.picture.get_image()
+                buffer = io.BytesIO()
+                image.resize((160, 160)).save(buffer, format='webp')
+                buffer.seek(0)
+                file = nextcord.File(fp=buffer, filename=(attachment.name or 'image') + '.webp')
+                files.append(file)
+            elif isinstance(attachment, IFile):
+                file_data = attachment.get_file()
+                buffer = io.BytesIO(file_data)
+                buffer.seek(0)
+                file = nextcord.File(fp=buffer, filename=(attachment.name or 'file.dat'))
+                files.append(file)
+            elif isinstance(attachment, UrlLink):
+                links += f'{attachment.name}: {attachment.url} '
+
         content = self.format_message(chat, message)
-        sent_message = await channel.send(content, reference=reference)
+        content = content + '\n' + links
+
+        channel = self.bot.get_channel(chat.id)
+        sent_message = await channel.send(content, reference=reference, files=files)
         return MessageID(chat, sent_message.id)
 
     async def edit_message(self, message_id: MessageID, new_message: Message):
-        channel = self.bot.get_channel(message_id.chat.id)
+        old_message = self.coordinator.db_get_message(message_id)
+
+        links = ''
+        for attachment in old_message.attachments:
+            if isinstance(attachment, UrlLink):
+                links += f'{attachment.name}: {attachment.url} '
+        
         content = self.format_message(message_id.chat, new_message)
+        content = content + '\n' + links
+
+        channel = self.bot.get_channel(message_id.chat.id)
         await channel.get_partial_message(message_id.id).edit(
             content=content
         )
@@ -117,6 +178,8 @@ class DiscordBot(IBot):
     async def delete_message(self, message_id: MessageID):
         channel = self.bot.get_channel(message_id.chat.id)
         await channel.get_partial_message(message_id.id).delete()
+
+        
     
     def __hash__(self) -> int:
         return super().__hash__()

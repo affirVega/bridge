@@ -3,6 +3,7 @@ from worker_types import *
 import asyncio
 import vk_api
 import vk_api.bot_longpoll
+from vk_api import VkUpload
 from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType, VkBotMessageEvent, DotDict as VkDotDict
 import random
 
@@ -14,13 +15,15 @@ class VkBot(IBot):
     settings: dict[str, object] = field(default_factory=dict)
     longpoll: VkBotLongPoll = field(default=None, init=False)
     task: asyncio.Task = field(default=None, init=False)
+    upload: VkUpload = field(default=None, init=False)
 
     def __post_init__(self):
         self.vk_api = vk_api.VkApi(token=self.settings['token'])
         self.api = self.vk_api.get_api()
         data = self.api.groups.get_by_id()
         group_id = data[0]['id']
-        self.longpoll = VkBotLongPoll(self.vk_api, group_id=group_id, wait=-5) # -5 потому что longpoll.check добавляет 10 к запросу
+        self.upload = VkUpload(self.api)
+        self.longpoll = VkBotLongPoll(self.vk_api, group_id=group_id, wait=0) # потому что longpoll.check добавляет 10 к запросу
 
     def _is_message_from_this_bot(self, native_message: dict) -> bool:
         return False
@@ -81,16 +84,18 @@ class VkBot(IBot):
     
     async def _run_polling(self):
         while not asyncio.current_task().cancelled():
-            await asyncio.sleep(0)
+            await asyncio.sleep(1)
             try:
                 for event in self.longpoll.check():
-                    await asyncio.sleep(0)
+                    await asyncio.sleep(1)
                     log.debug(event)
                     if isinstance(event, VkBotMessageEvent):
                         if event.type == VkBotEventType.MESSAGE_NEW:
                             await self._handle_new_message(event.message)
                         elif event.type == VkBotEventType.MESSAGE_REPLY:
                             await self._handle_new_message(event.message)
+                        elif event.type == VkBotEventType.MESSAGE_EDIT:
+                            pass # TODO не поддерживается??
                     if asyncio.current_task().cancelled():
                         return
             except Exception as e:
@@ -113,8 +118,61 @@ class VkBot(IBot):
                 log.debug(f"reply original id chat is current chat")
             reply_to = message.reply_to.get_message_id(chat)
             
-        attachment_str = '' # TODO
+        attachment_str = ''
+        links = ''
         text = self.format_message(chat, message)
+
+        photos: list[io.BytesIO] = []
+        files: list[io.BytesIO] = []
+        sticker: Optional[io.BytesIO] = None
+        for attachment in message.attachments:
+            if isinstance(attachment, IPicture):
+                image = attachment.get_image()
+                buffer = io.BytesIO()
+                image.save(buffer, format='webp')
+                buffer.seek(0)
+                photos.append(buffer)
+            elif isinstance(attachment, Sticker):
+                image = attachment.picture.get_image()
+                buffer = io.BytesIO()
+                image.resize((160, 160)).save(buffer, format='webp')
+                buffer.seek(0)
+                # TODO сделать обход невозможности отправить граффити
+                photos.append(buffer)
+            elif isinstance(attachment, IFile):
+                file_data = attachment.get_file()
+                buffer = io.BytesIO(file_data)
+                buffer.seek(0)
+                buffer.name = attachment.name or 'file.dat'
+                files.append(buffer)
+            elif isinstance(attachment, UrlLink):
+                links += f'{attachment.name}: {attachment.url} '
+        
+        if len(photos) >= 1:
+            uploaded = self.upload_message_pictures(photos)
+            log.info(f'picture: {uploaded}')
+            for photo in uploaded:
+                photo_key = f'photo{photo["owner_id"]}_{photo["id"]}_{photo["access_key"]},'
+                attachment_str += photo_key
+        
+        if len(files) >= 1:
+            uploaded = self.upload_message_document(documents=files, peer_id=chat.id + VK_CONVERSATION_ID)
+            log.info(f'file: {uploaded}')
+            for doc_data in uploaded:
+                doc = doc_data['doc']
+                doc_key = f'doc{doc["owner_id"]}_{doc["id"]},'
+                attachment_str += doc_key
+            # for title, file in files:
+            #     uploaded = self.upload.document(doc=file, title=title, group_id=self.longpoll.group_id, message_peer_id=chat.id + VK_CONVERSATION_ID, doc_type='doc')
+            #     log.info(f'file: {uploaded}')
+            #     doc_key = f'doc{uploaded["owner_id"]}_{uploaded["id"]}_{uploaded["access_key"]},'
+            #     attachment_str += doc_key
+        
+        attachment_str = attachment_str.removeprefix(',')
+        
+        # if sticker:
+        #     uploaded = self.upload.graffiti(sticker, chat.id + VK_CONVERSATION_ID, self.longpoll.group_id)
+        #     log.info('file: ' + uploaded)
 
         conversation_message_id = self.api.messages.send(
             chat_id=chat.id,
@@ -142,6 +200,39 @@ class VkBot(IBot):
             message_ids=str(message_id.id),
             delete_for_all=1
         )
+    
+    def upload_message_pictures(self, pictures: list[io.BytesIO]):
+        url = self.api.photos.getMessagesUploadServer(group_id=self.longpoll.group_id)['upload_url']
+
+        with vk_api.upload.FilesOpener(pictures) as photo_files:
+            response = self.upload.http.post(url, files=photo_files)
+
+        return self.api.photos.saveMessagesPhoto(**response.json())
+    
+    def upload_message_document(self, peer_id: int, documents: list[io.BytesIO], type: str = 'doc'):
+        values = {
+            'group_id': self.longpoll.group_id,
+            'peer_id': peer_id,
+            'type': type
+        }
+
+        method = self.api.docs.getMessagesUploadServer
+
+        url = method(**values)['upload_url']
+
+        foobar = []
+        for doc in documents:
+            with vk_api.upload.FilesOpener(doc, 'file') as files:
+                response = self.vk_api.http.post(url, files=files).json()
+
+            response.update({
+                'title': doc.name,
+                'tags': ''
+            })
+
+            foobar.append(self.api.docs.save(**response))
+        
+        return foobar
     
     def __hash__(self) -> int:
         return super().__hash__()
