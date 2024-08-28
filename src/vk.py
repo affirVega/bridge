@@ -72,7 +72,31 @@ class VkBot(IBot):
                 reply_to = await self.create_message_from_native(native_message.get('reply_message'), chat)
             except Exception:
                 log.warning('Не получилось получить reference сообщение')
-        attachments = [] # TODO
+        attachments = []
+
+        for attachment in native_message.get('attachments', []):
+            type = attachment['type']
+            if type == 'photo':
+                photo = attachment['photo']
+                sizes = photo['sizes']
+                url = sizes[-1]['url']
+                attachments.append(UrlPicture('img.jpg', url))
+            elif type == 'doc':
+                doc = attachment['doc']
+                title = doc['title']
+                size = doc['size']
+                url = doc['url']
+                if size > MAX_FILE_SIZE:
+                    attachments.append(UrlLink(title, url))
+                else:
+                    attachments.append(UrlFile(title, url))
+            elif type == 'sticker':
+                sticker = attachment['sticker']
+                images = sticker['images']
+                images_with_background = sticker['images_with_background']
+                url = images[-1]['url']
+                attachments.append(Sticker('sticker.png', UrlPicture('sticker.png', url)))
+
         message = Message(message_id,
                             author=await self.get_author(native_message['from_id']),
                             text=native_message['text'], reply_to=reply_to,
