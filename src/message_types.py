@@ -220,3 +220,13 @@ class Message:
 
     def __hash__(self):
         return hash(self.original_id)
+
+    def get_data(self, chat: Chat, key: str, default=None):
+        if key not in self.data:
+            return default
+        return self.data[key][chat]
+
+    def set_data(self, chat: Chat, key: str, value: object):
+        if key not in self.data:
+            self.data[key] = dict()
+        self.data[key][chat] = value

@@ -174,7 +174,7 @@ class TelegramBot(IBot):
             author = message.reply_to.author.name or message.reply_to.author.username
             text = message.reply_to.text
             reply_result =  md.expandable_blockquote(f'В ответ на [{prefix}] {author}:\n{text}')
-            result = f'{reply_result}\n{result}'
+            result = f'{result}\n{reply_result}'
         if links:
             result = f'{result}\nПрикреплённые ссылки: {links}'
         return result
@@ -220,8 +220,8 @@ class TelegramBot(IBot):
                 links += f'[{attachment.name}]({attachment.url}) '
         
         content = self.format_message(message, links, include_reply=(reply_message_id is None))
-        message.data['links'] = links
-        message.data['reply_message_id'] = reply_message_id
+        message.set_data(chat, 'links', links)
+        message.set_data(chat, 'reply_message_id', reply_message_id)
 
         first_sent_message = None
         ids = []
@@ -274,18 +274,14 @@ class TelegramBot(IBot):
             log.debug('Телеграм не разрешает редактировать сообщение одинаковым текстом')
             return
 
-        links = old_message.data.get('links', None)
-        reply_message_id = old_message.data.get('reply_message_id', None)
+        links = old_message.get_data(message_id.chat, 'links')
+        reply_message_id = old_message.get_data(message_id.chat, 'reply_message_id')
+        new_message.reply_to = old_message.reply_to
         content = self.format_message(new_message, links, include_reply=(reply_message_id is None))
         await self.bot.edit_message_text(text=content, chat_id=message_id.chat.id, message_id=message_id.id, parse_mode=ParseMode.MARKDOWN_V2)
 
     async def delete_message(self, message_id: MessageID):
         await self.bot.delete_message(message_id.chat.id, message_id.id)
-
-        # old_message = self.coordinator.db_get_message(message_id)
-        # if old_message and (ids := old_message.data.get('ids', None)):
-        #     for id in ids:
-        #         await self.bot.delete_message(message_id.chat.id, id)
 
     
     def __hash__(self) -> int:

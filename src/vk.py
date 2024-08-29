@@ -70,7 +70,9 @@ class VkBot(IBot):
         reply_to = None
         if 'reply_message' in native_message:
             try:
-                reply_to = await self.create_message_from_native(native_message.get('reply_message'), chat)
+                reply_data = self.api.messages.get_by_conversation_message_id(peer_id=VK_CONVERSATION_ID+chat.id, 
+                    conversation_message_ids=str(native_message['reply_message']['conversation_message_id']), extended=False)
+                reply_to = await self.create_message_from_native(reply_data['items'][0], chat)
             except Exception:
                 log.warning('Не получилось получить reference сообщение')
         attachments = []
@@ -133,8 +135,17 @@ class VkBot(IBot):
     def stop(self):
         self.task.cancel()
     
-    def format_message(self, chat: Chat, message: Message) -> str:
-        return f'{message.author.name}: {message.text}'
+    def format_message(self, message: Message, include_reply = False) -> str:
+        prefix = message.original_id.chat.prefix or Platform(message.original_id.chat.platform)
+        name = message.author.name or message.author.username
+        content = f'[{prefix}] {name}: {message.text}'
+        if include_reply and message.reply_to:
+            reply_prefix = message.reply_to.original_id.chat.prefix or Platform(message.reply_to.original_id.chat.platform)
+            reply_name = message.reply_to.author.name or message.reply_to.author.username
+            reply_content = message.reply_to.text.replace('\n', '\n> ')
+            content = f'{content}\n\n> В ответ на [{reply_prefix}] {reply_name}: {reply_content}'
+
+        return content
 
     async def send_message(self, chat: Chat, message: Message) -> MessageID:
         reply_to = None
@@ -142,10 +153,11 @@ class VkBot(IBot):
             if message.reply_to.original_id.chat == chat:
                 log.debug(f"reply original id chat is current chat")
             reply_to = message.reply_to.get_message_id(chat)
+        message.set_data(chat, 'reply', reply_to)
             
         attachment_str = ''
         links = ''
-        text = self.format_message(chat, message)
+        text = self.format_message(message, reply_to==None)
 
         photos: list[io.BytesIO] = []
         files: list[io.BytesIO] = []
@@ -210,7 +222,11 @@ class VkBot(IBot):
 
     async def edit_message(self, message_id: MessageID, new_message: Message):
         attachment_str = '' # TODO
-        text = self.format_message(message_id.chat, new_message)
+        old_message = self.coordinator.db_get_message(message_id)
+        reply = old_message.get_data(message_id.chat, 'reply')
+        new_message.reply_to = old_message.reply_to
+
+        text = self.format_message(new_message, reply==None)
         self.api.messages.edit(
             peer_id=message_id.chat.id + VK_CONVERSATION_ID,
             message=text,

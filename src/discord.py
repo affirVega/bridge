@@ -259,12 +259,12 @@ class DiscordBot(IBot):
                                                                                username=formatted.webhook_nick,
                                                                                avatar_url=url, embed=embed, 
                                                                                files=files, wait=True)
-                    message.data['webhook'] = sent_message
+                    message.set_data(chat, 'webhook', sent_message)
                     return MessageID(chat, sent_message.id)
                 else:
                     sent_message: nextcord.WebhookMessage = await webhook.send(content=formatted.text, username=formatted.webhook_nick,
                                                                             avatar_url=url, files=files, wait=True)
-                    message.data['webhook'] = sent_message
+                    message.set_data(chat, 'webhook', sent_message)
                     return MessageID(chat, sent_message.id)
         
         embed = None
@@ -295,9 +295,9 @@ class DiscordBot(IBot):
         formatted = self.format_message(new_message, links)
 
         if self.is_webhook_mode():
-            webhook_message: nextcord.WebhookMessage = old_message.data.get('webhook', None)
+            webhook_message: nextcord.WebhookMessage = old_message.get_data(message_id.chat, 'webhook', dict())
             if webhook_message:
-                webhook_message.edit(content=formatted.text)
+                await webhook_message.edit(content=formatted.text)
                 return
             else:
                 log.error('Не получилось достать webhook сообщение,')
@@ -306,7 +306,7 @@ class DiscordBot(IBot):
                 embed = native_message.embeds[0]
                 embed.description = formatted.text
 
-                native_message.edit(embed=embed)
+                await native_message.edit(embed=embed)
                 return
             await native_message.edit(content=formatted.default_text)
 

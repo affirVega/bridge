@@ -11,10 +11,6 @@ import dotenv
 import requests
 import logging
 
-
-
-
-
 VK_CONVERSATION_ID = 2000000000
 
 log = logging.getLogger('main')
