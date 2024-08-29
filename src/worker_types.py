@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Optional
 import logging
+import typing
 
 from message_types import *
 
@@ -142,9 +143,17 @@ class Coordinator:
         for bot in bots_chats:
             chats = bots_chats[bot]
             for chat in chats:
-                m_id = await bot.send_message(chat, message)
+                m_id = None
+                try:
+                    m_id = await bot.send_message(chat, message)
+                except Exception as e:
+                    log.error(f'Отправка сообщения от бота {bot.display_name()} выкинула исключение {e}')
+                    continue
                 if m_id is None:
                     log.error(f'send_message от бота {bot.display_name()} вернул None вместо messageid')
+                elif isinstance(m_id, list):
+                    for i in m_id:
+                        self.db_add_message_relay_id(i, message)
                 else:
                     self.db_add_message_relay_id(m_id, message)
     
@@ -163,7 +172,13 @@ class Coordinator:
             if not bot:
                 log.warning(f'Не могу найти бота по чату {new_message.original_id.chat}')
                 continue
-            await bot.edit_message(relay_m_id, new_message)
+            
+            try:
+                await bot.edit_message(relay_m_id, new_message)
+            except Exception as e:
+                log.error(f'Редактирование сообщения от бота {bot.display_name()} выкинуло исключение {e}')
+                continue
+            
     
     async def delete_all(self, message: Message):
         if message is None:
@@ -175,7 +190,11 @@ class Coordinator:
             if not bot:
                 log.warning(f'Не могу найти бота по чату {relay_m_id.chat}')
                 continue
-            await bot.delete_message(relay_m_id)
+            try:
+                await bot.delete_message(relay_m_id)
+            except Exception as e:
+                log.error(f'Удаление сообщения от бота {bot.display_name()} выкинуло исключение {e}')
+                continue
 
 
 @dataclass
@@ -326,3 +345,29 @@ class IBot:
     
     def __hash__(self) -> int:
         return super().__hash__()
+
+@dataclass
+class IUploader:
+    
+    def upload(self, data: bytes) -> str:
+        '''
+        Можно выложить файл и получить строку
+        '''
+        ...
+    
+
+@dataclass
+class ImgPushUploader(IUploader):
+    upload_url: str
+
+    def upload(self, data: bytes | typing.BinaryIO) -> Optional[str]:
+        buf = None
+        if hasattr(data, 'read'):
+            buf = data
+        else:
+            buf = io.BytesIO(data)
+        answer = requests.post(self.upload_url, files={'file': ('pfp.png', buf)})
+        log.info(answer.text)
+        if answer.ok:
+            return self.upload_url + '/' + answer.json()['filename']
+        return None

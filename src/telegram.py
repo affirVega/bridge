@@ -1,7 +1,11 @@
+from datetime import datetime
 import os
 import uuid
 
 import aiogram.filters
+import aiogram.utils.markdown as mdutils
+from aiogram.utils.text_decorations import markdown_decoration as md
+from aiogram.enums.parse_mode import ParseMode
 from worker_types import *
 
 import asyncio
@@ -59,18 +63,25 @@ class TelegramBot(IBot):
     def get_current_chat_from_native_message(self, message: aiogram.types.Message):
         return self.get_current_chat(Platform.Telegram, None, message.chat.id)
     
-    def get_author(self, user: aiogram.types.User):
+    async def get_author(self, user: aiogram.types.User):
         author = self.coordinator.get_author(Platform.Telegram, user.id)
         if author: 
             return author
         pfp = None
-        profile_photos: GetUserProfilePhotos = user.get_profile_photos(limit=1)
-        print(profile_photos)
+        user_profile_photo: aiogram.types.UserProfilePhotos = await self.bot.get_user_profile_photos(user.id, limit=1)
+        if len(user_profile_photo.photos) > 0 and len(user_profile_photo.photos[0]) > 0:
+            file = await self.bot.get_file(user_profile_photo.photos[0][-1].file_id)
+            buf = io.BytesIO()
+            await self.bot.download_file(file.file_path, buf)
+            pfp = TempImage('pfp.png', Image.open(buf))
+        else:
+            log.debug('У пользователя нет фото в профиле.')
         # if len(profile_photos.photos) >= 1:
         #     pfp = UrlPicture(f'pfp of {user.full_name}', profile_photos.photos[0])
         author = Author(Platform.Telegram, id=user.id, 
                         name=user.full_name, 
                         username=user.username, pfp=pfp)
+        self.coordinator.add_author(author)
         return author
 
     async def create_message_from_native(self, native_message: aiogram.types.Message, chat: Chat, retrieve_from_db=True) -> Optional[Message]:
@@ -91,7 +102,7 @@ class TelegramBot(IBot):
         attachments = await self.get_attachments_from_natives([native_message])
 
         message = Message(message_id,
-                            author=self.get_author(native_message.from_user),
+                            author=await self.get_author(native_message.from_user),
                             text=native_message.text or '', reply_to=reply_to,
                             attachments=attachments)
         return message
@@ -152,16 +163,30 @@ class TelegramBot(IBot):
         asyncio.create_task(self.dp.stop_polling())
         # self.task.cancel()
 
-    def format_message(self, chat: Chat, message: Message) -> str:
-        return f'{message.author.name}: {message.text}'
+    def format_message(self, message: Message, links: str = None, include_reply: bool = False) -> str:
+        prefix = message.original_id.chat.prefix or Platform(message.original_id.chat.platform).name
+        author = message.author.name or message.author.username
+        text = message.text
+        result = md.quote(f'[{prefix}] {author}: {text}')
+        if include_reply and message.reply_to:
+            reply_chat = message.reply_to.original_id.chat
+            prefix = reply_chat.prefix or Platform(reply_chat.platform).name
+            author = message.reply_to.author.name or message.reply_to.author.username
+            text = message.reply_to.text
+            reply_result =  md.expandable_blockquote(f'В ответ на [{prefix}] {author}:\n{text}')
+            result = f'{reply_result}\n{result}'
+        if links:
+            result = f'{result}\nПрикреплённые ссылки: {links}'
+        return result
+        
     
     async def send_message(self, chat: Chat, message: Message) -> MessageID:
-        message_id = None
+        reply_message_id = None
         if message.reply_to:
             if message.reply_to.original_id.chat == chat:
                 log.debug(f"reply original id chat is current chat")
             
-            message_id = message.reply_to.get_message_id(chat)
+            reply_message_id = message.reply_to.get_message_id(chat)
         
         links = ''
         pictures: list[aiogram.types.InputMediaPhoto] = []
@@ -192,56 +217,76 @@ class TelegramBot(IBot):
                 file = aiogram.types.InputMediaDocument(media=file_data, filename=(attachment.name or 'file.dat'))
                 documents.append(file)
             elif isinstance(attachment, UrlLink):
-                links += f'{attachment.name}: {attachment.url} '
+                links += f'[{attachment.name}]({attachment.url}) '
         
-        content=self.format_message(chat, message)
-        content += '\n' + links
+        content = self.format_message(message, links, include_reply=(reply_message_id is None))
+        message.data['links'] = links
+        message.data['reply_message_id'] = reply_message_id
 
         first_sent_message = None
-
+        ids = []
 
         if len(pictures) == 0 and len(documents) == 0:
             if message.text is not None or message.text != '' or sticker:
-                first_sent_message = await self.bot.send_message(chat_id=chat.id, text=content or '', reply_to_message_id=message_id)
+                first_sent_message = await self.bot.send_message(chat_id=chat.id, text=content or '', reply_to_message_id=reply_message_id,
+                                                                 parse_mode=ParseMode.MARKDOWN_V2)
                 content = message.author.name + ':'
+                ids.append(first_sent_message.message_id)
         
         if sticker:
-            await self.bot.send_sticker(chat_id=chat.id, sticker=sticker, reply_to_message_id=message_id)
+            sent_message = await self.bot.send_sticker(chat_id=chat.id, sticker=sticker, reply_to_message_id=reply_message_id)
+            ids.append(sent_message.message_id)
         
         caption = content or ''
 
         if len(pictures) >= 2:
             pictures[0].caption = caption
-            sent_messages = await self.bot.send_media_group(chat_id=chat.id, media=pictures, reply_to_message_id=message_id, request_timeout=120)
+            sent_messages = await self.bot.send_media_group(chat_id=chat.id, media=pictures, reply_to_message_id=reply_message_id, request_timeout=120)
+            for sm in sent_messages:
+                ids.append(sm.message_id)
             if first_sent_message is None:
                 first_sent_message = sent_messages[0]
         elif len(pictures) == 1:
-            sent_message = await self.bot.send_photo(chat_id=chat.id, photo=pictures[0].media, caption=caption, reply_to_message_id=message_id, request_timeout=120)
+            sent_message = await self.bot.send_photo(chat_id=chat.id, photo=pictures[0].media, caption=caption, reply_to_message_id=reply_message_id, request_timeout=120)
+            ids.append(sent_message.message_id)
             if first_sent_message is None:
                 first_sent_message = sent_message
         
         if len(documents) >= 2:
             documents[0].caption = caption
-            sent_messages = await self.bot.send_media_group(chat_id=chat.id, media=documents, reply_to_message_id=message_id, request_timeout=120)
+            sent_messages = await self.bot.send_media_group(chat_id=chat.id, media=documents, reply_to_message_id=reply_message_id, request_timeout=120)
+            for sm in sent_messages:
+                ids.append(sm.message_id)
             if first_sent_message is None:
                 first_sent_message = sent_messages[0]
         elif len(documents) == 1:
-            sent_message = await self.bot.send_document(chat_id=chat.id, document=documents[0].media, caption=caption, reply_to_message_id=message_id, request_timeout=120)
+            sent_message = await self.bot.send_document(chat_id=chat.id, document=documents[0].media, caption=caption, reply_to_message_id=reply_message_id, request_timeout=120)
+            ids.append(sent_message.message_id)
             if first_sent_message is None:
                 first_sent_message = sent_message
 
-        return MessageID(chat, first_sent_message.message_id)
+        return [MessageID(chat, mid) for mid in ids] 
 
     async def edit_message(self, message_id: MessageID, new_message: Message):
-        content = self.format_message(message_id.chat, new_message)
         old_message = self.coordinator.db_get_message(message_id)
-        if old_message and self.format_message(message_id.chat, old_message.text) == content:
+
+        if old_message and old_message.text == new_message.text:
             log.debug('Телеграм не разрешает редактировать сообщение одинаковым текстом')
             return
-        await self.bot.edit_message_text(text=content, chat_id=message_id.chat.id, message_id=message_id.id)
+
+        links = old_message.data.get('links', None)
+        reply_message_id = old_message.data.get('reply_message_id', None)
+        content = self.format_message(new_message, links, include_reply=(reply_message_id is None))
+        await self.bot.edit_message_text(text=content, chat_id=message_id.chat.id, message_id=message_id.id, parse_mode=ParseMode.MARKDOWN_V2)
 
     async def delete_message(self, message_id: MessageID):
         await self.bot.delete_message(message_id.chat.id, message_id.id)
+
+        # old_message = self.coordinator.db_get_message(message_id)
+        # if old_message and (ids := old_message.data.get('ids', None)):
+        #     for id in ids:
+        #         await self.bot.delete_message(message_id.chat.id, id)
+
     
     def __hash__(self) -> int:
         return super().__hash__()

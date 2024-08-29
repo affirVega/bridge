@@ -17,6 +17,7 @@ class Chat:
     platform: Platform
     id: int
     server_id: Optional[int] = None
+    prefix: Optional['str'] = field(default=None, compare=False)
 
     def __hash__(self):
         return hash((self.platform, self.id, self.server_id))
@@ -184,6 +185,9 @@ class Author:
     name: str
     username: str
     pfp: Optional[IPicture]
+    pfp_url: Optional[str] = None
+
+    
 
 
 @dataclass
@@ -204,6 +208,7 @@ class Message:
     relay_ids: list[MessageID] = field(default_factory=list)
     forwarded: list['Message'] = field(default_factory=list)
     attachments: list[IAttachment] = field(default_factory=list)
+    data: dict = field(default_factory=dict, init=False, compare=False)
 
     def get_message_id(self, chat: Chat) -> Optional[int]:
         if chat == self.original_id.chat:

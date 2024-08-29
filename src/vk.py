@@ -55,6 +55,7 @@ class VkBot(IBot):
             pfp = UrlPicture(f'pfp of {name}', user_data['photo_max_orig'])
         author = Author(Platform.Vk, id=user_id, 
                         name=name, username=user_data['screen_name'], pfp=pfp)
+        self.coordinator.add_author(author)
         return author
 
     async def create_message_from_native(self, native_message: VkDotDict, chat: Chat, retrieve_from_db=True) -> Optional[Message]:

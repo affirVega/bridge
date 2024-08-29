@@ -1,8 +1,15 @@
+from datetime import datetime
+import time
+import nextcord.types
+import nextcord.types.guild
 from worker_types import *
+from collections import namedtuple
 
 import asyncio
 import nextcord
 from nextcord.ext import commands
+
+EMBED_REPLY_MARK = '~'
 
 @dataclass
 class DiscordBot(IBot):
@@ -12,6 +19,8 @@ class DiscordBot(IBot):
     task: asyncio.Task = field(default=None, init=False)
 
     def _is_message_from_this_bot(self, native_message: nextcord.Message):
+        if native_message.author.bot and native_message.author.discriminator == '0000':
+            return True # TODO is a webhook probably?
         return native_message.author == self.bot.user
 
     def _message_preview_for_log(self, native_message: nextcord.Message):
@@ -57,6 +66,7 @@ class DiscordBot(IBot):
         author = Author(Platform.Discord, id=user.id, 
                         name=user.display_name or user.global_name or user.name, 
                         username=user.name, pfp=pfp)
+        self.coordinator.add_author(author)
         return author
 
     async def create_message_from_native(self, native_message: nextcord.Message, chat: Chat, retrieve_from_db=True) -> Optional[Message]:
@@ -105,6 +115,28 @@ class DiscordBot(IBot):
     
     def is_running(self) -> bool:
         return self.task and self.task.done()
+
+    def is_webhook_mode(self) -> bool:
+        return self.settings.get('webhook', False)
+    
+    def is_embed_mode(self) -> bool:
+        return self.settings.get('embed', False)
+
+    async def get_webhook(self, channel: nextcord.TextChannel, name: str = 'bridge-bot', webhook_avatar: bytes = None) -> nextcord.Webhook:
+        if not isinstance(channel, nextcord.TextChannel):
+            return None
+        
+        webhooks = await channel.webhooks()
+        webhook = None
+        for wh in webhooks:
+            if wh.name.startswith(name):
+                webhook = wh
+                break
+        if webhook is None:
+            webhook = await channel.create_webhook(name=name + ' ' + str(time.time())[-5:], 
+                                   avatar=webhook_avatar, 
+                                   reason='Created for bridge bot to send webhooks')
+        return webhook
     
     def start(self):
         self.task = asyncio.create_task(self.bot.start(self.settings['token']))
@@ -112,9 +144,44 @@ class DiscordBot(IBot):
 
     def stop(self):
         self.task.cancel()
+
+    @dataclass
+    class FormattedMessage:
+        nick: str = None
+        webhook_nick: str = None
+        text: str = None
+        default_text: str = None
+        footer: str = None
     
-    def format_message(self, chat: Chat, message: Message) -> str:
-        return f'{message.author.name}: {message.text}'
+    def format_message(self, message: Message, links: str = None) -> FormattedMessage:
+        prefix = message.original_id.chat.prefix or Platform(message.original_id.chat.platform).name
+        name = message.author.name or message.author.username
+        nick = name
+        text = message.text
+        if links:
+            text = f'{text}\nСсылки: {links}'
+        footer = f'-# Сообщение из чата: {prefix}'
+        webhook_nick = f'[{prefix}] {name}'
+        default_text = f'{webhook_nick}: {text}'
+        return self.FormattedMessage(nick, webhook_nick, text, default_text, footer)
+    
+    def get_pfp_url(self, author: Author) -> Optional[str]:
+        if author.pfp_url:
+            return author.pfp_url
+        if author.pfp and isinstance(author.pfp, UrlPicture):
+            return author.pfp.url
+        if author.pfp:
+            if uploader := self.settings.get('uploader', None):
+                buffer = io.BytesIO()
+                author.pfp.get_image().save(buffer, 'png')
+                buffer.seek(0)
+                url = uploader.upload(buffer)
+                author.pfp_url = url
+                return url
+            else:
+                log.warn('Без uploader в discord иногда могут не показываться аватарки, потому что discord требует их по публичной ссылке')
+                return None
+        return None
 
     async def send_message(self, chat: Chat, message: Message) -> MessageID:
         reference = None
@@ -152,12 +219,67 @@ class DiscordBot(IBot):
             elif isinstance(attachment, UrlLink):
                 links += f'{attachment.name}: {attachment.url} '
 
-        content = self.format_message(chat, message)
-        content = content + '\n' + links
+        formatted = self.format_message(message, links)
 
         channel = self.bot.get_channel(chat.id)
-        sent_message = await channel.send(content, reference=reference, files=files)
-        return MessageID(chat, sent_message.id)
+        wait_count = 0
+        while channel is None:
+            log.warn(f'Канал вернул None, ждём 5 секунд, попытка {wait_count+1}')
+            await asyncio.sleep(5)
+            channel = self.bot.get_channel(chat.id)
+            wait_count += 1
+            if wait_count >= 5:
+                log.error(f'Попытались получить канал {wait_count} раз, выходим')
+                return
+            
+        if self.is_webhook_mode():
+            webhook = await self.get_webhook(channel)
+            if webhook is None:
+                log.error('Не получилось достать вебхук, фолбечим на обычное редактирование')
+            else:
+                uploader = self.settings.get('uploader', None)
+                url = self.get_pfp_url(message.author)
+                if url is None and uploader is None:
+                    log.warn('uploader для дискорд бота с вебхуком не установлен, без него некоторые аватарки не получится отобразить')
+                if self.is_embed_mode() and message.reply_to:
+                    formatted_reply = self.format_message(message.reply_to)
+
+                    embed = nextcord.Embed(type='rich', color=0x000000)
+                    embed.set_author(name= EMBED_REPLY_MARK + 'В ответ на ' +formatted_reply.nick, icon_url=self.get_pfp_url(message.reply_to.author))
+                    embed.description = formatted_reply.text
+                    embed.set_footer(text=formatted_reply.footer)
+
+                    mention_member = channel.guild.get_member(message.reply_to.author.id)
+                    if message.reply_to.author.platform == Platform.Discord and mention_member:
+                        mention = f'\n||{mention_member.mention}||'
+                    else:
+                        mention = ''
+                    
+                    sent_message: nextcord.WebhookMessage = await webhook.send(content=formatted.text + mention, 
+                                                                               username=formatted.webhook_nick,
+                                                                               avatar_url=url, embed=embed, 
+                                                                               files=files, wait=True)
+                    message.data['webhook'] = sent_message
+                    return MessageID(chat, sent_message.id)
+                else:
+                    sent_message: nextcord.WebhookMessage = await webhook.send(content=formatted.text, username=formatted.webhook_nick,
+                                                                            avatar_url=url, files=files, wait=True)
+                    message.data['webhook'] = sent_message
+                    return MessageID(chat, sent_message.id)
+        
+        embed = None
+        if self.is_embed_mode():
+            embed = nextcord.Embed(type='rich', color=0x000000)
+            embed.set_author(name=formatted.nick, icon_url=self.get_pfp_url(message.author))
+            embed.description = formatted.text
+            embed.set_footer(text=formatted.footer)
+
+            sent_message = await channel.send(embed=embed, reference=reference, files=files)
+            return MessageID(chat, sent_message.id)
+
+        else:
+            sent_message = await channel.send(formatted.default_text, reference=reference, files=files)
+            return MessageID(chat, sent_message.id)
 
     async def edit_message(self, message_id: MessageID, new_message: Message):
         old_message = self.coordinator.db_get_message(message_id)
@@ -166,20 +288,31 @@ class DiscordBot(IBot):
         for attachment in old_message.attachments:
             if isinstance(attachment, UrlLink):
                 links += f'{attachment.name}: {attachment.url} '
-        
-        content = self.format_message(message_id.chat, new_message)
-        content = content + '\n' + links
 
         channel = self.bot.get_channel(message_id.chat.id)
-        await channel.get_partial_message(message_id.id).edit(
-            content=content
-        )
+        native_message = await channel.fetch_message(message_id.id)
+        
+        formatted = self.format_message(new_message, links)
+
+        if self.is_webhook_mode():
+            webhook_message: nextcord.WebhookMessage = old_message.data.get('webhook', None)
+            if webhook_message:
+                webhook_message.edit(content=formatted.text)
+                return
+            else:
+                log.error('Не получилось достать webhook сообщение,')
+        else:
+            if len(native_message.embeds) > 0:
+                embed = native_message.embeds[0]
+                embed.description = formatted.text
+
+                native_message.edit(embed=embed)
+                return
+            await native_message.edit(content=formatted.default_text)
 
     async def delete_message(self, message_id: MessageID):
         channel = self.bot.get_channel(message_id.chat.id)
         await channel.get_partial_message(message_id.id).delete()
-
-        
     
     def __hash__(self) -> int:
         return super().__hash__()
