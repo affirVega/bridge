@@ -163,3 +163,4 @@ cython_debug/
 
 # pickle dumps
 *.pkl
+config.yaml

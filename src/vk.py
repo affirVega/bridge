@@ -136,7 +136,7 @@ class VkBot(IBot):
         self.task.cancel()
     
     def format_message(self, message: Message, include_reply = False) -> str:
-        prefix = message.original_id.chat.prefix or Platform(message.original_id.chat.platform)
+        prefix = message.original_id.chat.prefix or Platform(message.original_id.chat.platform).name
         name = message.author.name or message.author.username
         content = f'[{prefix}] {name}: {message.text}'
         if include_reply and message.reply_to:

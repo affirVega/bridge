@@ -11,6 +11,9 @@ import dotenv
 import requests
 import logging
 
+import yaml.loader
+import yaml.loader
+
 VK_CONVERSATION_ID = 2000000000
 
 log = logging.getLogger('main')
@@ -39,43 +42,69 @@ from vk import *
 
 coordinator: Optional[Coordinator] = None
 async def main():
+    from yaml import load as yamlload
+    from yaml import Loader as YamlLoader
+
+    if not os.path.exists('config.yaml'):
+        log.error('Конфиг config.yaml не найден, создайте конфиг по примеру config.yaml.example')
+        exit(0)
+
+    with open('config.yaml', 'r', encoding='utf-8') as f:
+        data: dict = yamlload(f, Loader=YamlLoader)
+        
     global coordinator
     coordinator = Coordinator()
-
-    discord_bot = DiscordBot(0, 'Чёрный кот', coordinator, settings = {
-        'token': os.environ.get('DISCORD_TOKEN'),
-        'embed': True,
-        'webhook': True,
-        'uploader': ImgPushUploader(os.environ.get('UPLOAD_SERVER'))
-    })
-
-    vk_bot = VkBot(1, 'Феся бот', coordinator, settings={
-        'token': os.environ.get('VK_TOKEN')
-    })
-
-    telegram_bot = TelegramBot(2, 'Тг бот', coordinator, settings={
-        'token': os.environ.get('TG_TOKEN')
-    })
     
-    bridge = Bridge(0)
+    coordinator_key = list(data.keys())[0]
+    bots = data[coordinator_key]['bots']
+    bridges = data[coordinator_key]['bridges']
+    chats = data[coordinator_key]['chats']
 
-    coordinator.add_bridge(bridge)
-    
-    chat1 = Chat(Platform.Discord, id=1258178824726642789, server_id=1254431449029935114, prefix='дс1')
-    coordinator.add_chat_to_bridge(bridge, chat1)
-    coordinator.link_bot_chat(discord_bot, chat1)
-    
-    chat2 = Chat(Platform.Discord, id=1272671241056026747, server_id=1254431449029935114, prefix='дс2')
-    coordinator.add_chat_to_bridge(bridge, chat2)
-    coordinator.link_bot_chat(discord_bot, chat2)
-    
-    chat3 = Chat(Platform.Vk, id=4, prefix='вк')
-    coordinator.add_chat_to_bridge(bridge, chat3)
-    coordinator.link_bot_chat(vk_bot, chat3)
+    bot_by_keys = dict()
+    bridge_by_key = dict()
 
-    chat4 = Chat(Platform.Telegram, id=-4502798177, prefix='тг')
-    coordinator.add_chat_to_bridge(bridge, chat4)
-    coordinator.link_bot_chat(telegram_bot, chat4)
+    for bot_key in bots:
+        bot_data = bots[bot_key]
+        name = bot_data['name']
+        match bot_data['type']:
+            case 'discord':
+                if 'uploader' in bot_data:
+                    uploader_type, link = bot_data['uploader'].split()
+                    bot_data.pop('uploader')
+                    if uploader_type == 'imgpush':
+                        uploader = ImgPushUploader(link)
+                        bot_data['uploader'] = uploader
+                bot_instance = DiscordBot(bot_key, name, coordinator, settings=bot_data)
+                bot_by_keys[bot_key] = bot_instance
+            case 'telegram':
+                bot_instance = TelegramBot(bot_key, name, coordinator, settings=bot_data)
+                bot_by_keys[bot_key] = bot_instance
+            case 'vk':
+                bot_instance = VkBot(bot_key, name, coordinator, settings=bot_data)
+                bot_by_keys[bot_key] = bot_instance
+    
+    for bridge_key in bridges:
+        bridge = Bridge(bridge_key)
+        bridge_by_key[bridge_key] = bridge
+        coordinator.add_bridge(bridge)
+    
+    for chat_data in chats:
+        id = chat_data['id']
+        server_id = chat_data.get('server_id', None)
+        bot_id = chat_data['bot_id']
+        prefix = chat_data.get('prefix', '')
+        bridge = chat_data.get('bridge', None)
+        bridges = chat_data.get('bridges', [])
+        if bridge is not None:
+            bridges.append(bridge)
+        bot = bot_by_keys[bot_id]
+        platform = bot.platform
+
+        chat = Chat(platform, id, server_id, prefix=prefix)
+        for bridge_key in bridges:
+            bridge = bridge_by_key[bridge_key]
+            coordinator.add_chat_to_bridge(bridge, chat)
+        coordinator.link_bot_chat(bot, chat)
 
     coordinator.start_all_bots()
 

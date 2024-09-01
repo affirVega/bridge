@@ -1,0 +1,42 @@
+coordinator:
+    bots:
+        diskoooo:
+            type: discord
+            name: Чёрный кот
+            webhook: true
+            embed: true
+            uploader: imgpush http://your_server:12345 # your server here or remove this line https://github.com/hauxir/imgpush
+            token: "..................."
+        telega:
+            type: telegram
+            name: Тележник
+            token: "................."
+        groupbot:
+            type: vk
+            name: Вкашник
+            token: ".............."
+    bridges:
+        furries:
+        friends:
+    chats:
+        -   id: 41414141414141441414141
+            server_id: 41414141414141
+            bot_id: diskoooo
+            prefix: ds
+            bridge: furries
+
+        -   id: 4141414141414141144141
+            server_id: 141414141414141414
+            bot_id: diskoooo
+            prefix: ds
+            bridges: [furries, friends]
+
+        -   id: 1
+            bot_id: groupbot
+            bridge: furries
+            prefix: vk
+
+        -   id: -141414141414
+            bot_id: telega
+            bridges: [friends]
+            prefix: tg

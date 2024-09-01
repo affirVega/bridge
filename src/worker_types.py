@@ -199,7 +199,7 @@ class Coordinator:
 
 @dataclass
 class Bridge:
-    id: int
+    id: str
     chats: list[Chat] = field(default_factory=list)
 
     def add_chat(self, chat: Chat):
@@ -213,7 +213,7 @@ class Bridge:
 
 @dataclass
 class IBot:
-    id: int
+    id: str
     name: str
     coordinator: Coordinator
     platform: Platform = field(default=None, init=False)
